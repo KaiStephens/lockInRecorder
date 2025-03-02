@@ -1,4 +1,4 @@
-document.addEventListener('DOMContentLoaded', function() {
+$(document).ready(function() {
     // Elements
     const startRecordingBtn = document.getElementById('start-recording');
     const stopRecordingBtn = document.getElementById('stop-recording');
@@ -8,7 +8,6 @@ document.addEventListener('DOMContentLoaded', function() {
     const resolutionSelect = document.getElementById('resolution-select');
     const convertToggle = document.getElementById('convert-toggle');
     const outputDirectory = document.getElementById('output-directory');
-    const recordingInfo = document.getElementById('recording-info');
     const recordingsList = document.getElementById('recordings-list');
     const recordingIndicator = document.getElementById('recording-indicator');
     const recordingTime = document.getElementById('recording-time');
@@ -24,6 +23,12 @@ document.addEventListener('DOMContentLoaded', function() {
     let recordingStartTime = null;
     let recordingTimer = null;
     let recentRecordings = [];
+
+    // Load saved settings
+    loadSettings();
+    
+    // Load recent recordings
+    loadRecordings();
 
     // Update FPS value display
     fpsRange.addEventListener('input', function() {
@@ -41,6 +46,9 @@ document.addEventListener('DOMContentLoaded', function() {
             showToast('Error', 'Output directory cannot be empty!', 'error');
             return;
         }
+
+        // Save settings locally
+        saveSettings();
 
         // Send settings to server
         fetch('/update_settings', {
@@ -103,7 +111,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 updateUI(true);
                 startTimer();
                 showToast('Recording Started', 'Recording to ' + data.filename, 'success');
-                updateRecordingInfo('Recording in progress...', data.filename);
             } else {
                 showToast('Error', data.message, 'error');
             }
@@ -143,7 +150,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
                 
                 updateRecordingsList();
-                updateRecordingInfo('Recording completed!', data.filename);
                 
                 if (data.converted) {
                     showToast('Recording Complete', 'Video converted to 1 minute duration!', 'success');
@@ -197,13 +203,6 @@ document.addEventListener('DOMContentLoaded', function() {
         return `${minutes}:${seconds}`;
     }
 
-    function updateRecordingInfo(status, filename) {
-        recordingInfo.innerHTML = `
-            <p><strong>Status:</strong> ${status}</p>
-            ${filename ? `<p><strong>File:</strong> ${filename}</p>` : ''}
-        `;
-    }
-
     function updateRecordingsList() {
         recordingsList.innerHTML = '';
         if (recentRecordings.length === 0) {
@@ -253,8 +252,124 @@ document.addEventListener('DOMContentLoaded', function() {
         toast.show();
     }
 
+    // Settings persistence functions
+    function saveSettings() {
+        const settings = {
+            fps: parseInt(fpsRange.value),
+            resolution: resolutionSelect.value,
+            convertToOneMinute: convertToggle.checked,
+            outputDirectory: outputDirectory.value
+        };
+        
+        localStorage.setItem('lockInRecorderSettings', JSON.stringify(settings));
+        
+        // Also save to server
+        fetch('/save_settings', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(settings)
+        })
+        .catch(error => {
+            console.error('Failed to save settings to server:', error);
+        });
+    }
+    
+    function loadSettings() {
+        // Try to load from localStorage first
+        const savedSettings = localStorage.getItem('lockInRecorderSettings');
+        
+        if (savedSettings) {
+            const settings = JSON.parse(savedSettings);
+            fpsRange.value = settings.fps || 2;
+            fpsValue.textContent = settings.fps || 2;
+            
+            if (settings.resolution) {
+                // Find the option with this value
+                const options = Array.from(resolutionSelect.options);
+                const option = options.find(opt => opt.value === settings.resolution);
+                if (option) {
+                    option.selected = true;
+                }
+            }
+            
+            convertToggle.checked = settings.convertToOneMinute !== undefined ? settings.convertToOneMinute : true;
+            outputDirectory.value = settings.outputDirectory || 'recordings';
+        }
+        
+        // Then try to load from server
+        fetch('/load_settings')
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success' && data.settings) {
+                    const settings = data.settings;
+                    fpsRange.value = settings.fps || 2;
+                    fpsValue.textContent = settings.fps || 2;
+                    
+                    if (settings.resolution) {
+                        // Find the option with this value
+                        const options = Array.from(resolutionSelect.options);
+                        const option = options.find(opt => opt.value === settings.resolution);
+                        if (option) {
+                            option.selected = true;
+                        }
+                    }
+                    
+                    convertToggle.checked = settings.convertToOneMinute !== undefined ? settings.convertToOneMinute : true;
+                    outputDirectory.value = settings.outputDirectory || 'recordings';
+                    
+                    // Also update localStorage
+                    localStorage.setItem('lockInRecorderSettings', JSON.stringify(settings));
+                }
+            })
+            .catch(error => {
+                console.error('Failed to load settings from server:', error);
+            });
+    }
+
+    function loadRecordings() {
+        // Fetch recordings from the server
+        $.ajax({
+            url: '/get_recordings',
+            type: 'GET',
+            success: function(response) {
+                if (response.status === 'success') {
+                    displayRecordings(response.recordings);
+                }
+            },
+            error: function(error) {
+                console.error('Error loading recordings:', error);
+            }
+        });
+    }
+
+    function displayRecordings(recordings) {
+        const recordingsList = $('#recordings-list');
+        recordingsList.empty();
+        
+        if (recordings.length === 0) {
+            recordingsList.append('<div class="list-group-item">No recordings found</div>');
+            return;
+        }
+        
+        // Add each recording to the list
+        recordings.forEach(function(recording) {
+            const recordingItem = `
+                <div class="list-group-item">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <div class="recording-name">${recording.name}</div>
+                            <div class="recording-info">${recording.modified} - ${recording.size}</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            recordingsList.append(recordingItem);
+        });
+    }
+
     // Initialize with default UI state
     updateUI(false);
-    updateRecordingInfo('No recording in progress');
     updateRecordingsList();
 }); 

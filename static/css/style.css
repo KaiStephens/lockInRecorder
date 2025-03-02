@@ -42,7 +42,7 @@ body {
 
 #recording-indicator {
     position: absolute;
-    top: 20px;
+    bottom: 20px;
     left: 20px;
     display: flex;
     align-items: center;
@@ -50,6 +50,10 @@ body {
     padding: 10px 15px;
     border-radius: 20px;
     color: white;
+}
+
+#recording-indicator.d-none {
+    display: none;
 }
 
 .record-dot {

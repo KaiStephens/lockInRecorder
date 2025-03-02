@@ -42,9 +42,9 @@
                         <div class="mb-3">
                             <label for="resolution-select" class="form-label">Resolution:</label>
                             <select class="form-select" id="resolution-select">
-                                <option value="640x480" selected>640x480</option>
+                                <option value="640x480">640x480</option>
                                 <option value="1280x720">1280x720</option>
-                                <option value="1920x1080">1920x1080</option>
+                                <option value="1920x1080" selected>1920x1080</option>
                             </select>
                         </div>
                         
@@ -60,6 +60,36 @@
                             <input type="text" class="form-control" id="output-directory" value="recordings">
                         </div>
                         
+                        <!-- Timestamp Settings -->
+                        <div class="mb-3">
+                            <label class="form-label">Timestamp Settings:</label>
+                            <div class="row g-2 mb-2">
+                                <div class="col">
+                                    <label for="timestamp-position" class="form-label small">Position:</label>
+                                    <select class="form-select form-select-sm" id="timestamp-position">
+                                        <option value="top-left">Top Left</option>
+                                        <option value="top-right">Top Right</option>
+                                        <option value="bottom-left">Bottom Left</option>
+                                        <option value="bottom-right">Bottom Right</option>
+                                        <option value="bottom-center" selected>Bottom Center</option>
+                                    </select>
+                                </div>
+                                <div class="col">
+                                    <label for="timestamp-size" class="form-label small">Size:</label>
+                                    <select class="form-select form-select-sm" id="timestamp-size">
+                                        <option value="0.8">Small</option>
+                                        <option value="1.2" selected>Medium</option>
+                                        <option value="1.6">Large</option>
+                                        <option value="2.0">X-Large</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="timestamp-enabled" checked>
+                                <label class="form-check-label" for="timestamp-enabled">Show Timestamp</label>
+                            </div>
+                        </div>
+                        
                         <button id="apply-settings" class="btn btn-secondary w-100">
                             <i class="fas fa-save"></i> Apply Settings
                         </button>
@@ -73,19 +103,6 @@
                     <button id="stop-recording" class="btn btn-secondary btn-lg" disabled>
                         <i class="fas fa-stop"></i> Stop Recording
                     </button>
-                </div>
-                
-                <div class="mt-4">
-                    <div class="card">
-                        <div class="card-header">
-                            <h5><i class="fas fa-info-circle"></i> Recording Information</h5>
-                        </div>
-                        <div class="card-body">
-                            <div id="recording-info">
-                                <p>No recording in progress</p>
-                            </div>
-                        </div>
-                    </div>
                 </div>
                 
                 <div class="mt-4">
@@ -117,6 +134,7 @@
         </div>
     </div>
     
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="{{ url_for('static', filename='js/script.js') }}"></script>
 </body>
