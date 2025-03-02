@@ -1,4 +1,4 @@
-$(document).ready(function() {
+document.addEventListener('DOMContentLoaded', function() {
     // Elements
     const startRecordingBtn = document.getElementById('start-recording');
     const stopRecordingBtn = document.getElementById('stop-recording');
@@ -26,9 +26,6 @@ $(document).ready(function() {
 
     // Load saved settings
     loadSettings();
-    
-    // Load recent recordings
-    loadRecordings();
 
     // Update FPS value display
     fpsRange.addEventListener('input', function() {
@@ -326,47 +323,6 @@ $(document).ready(function() {
             .catch(error => {
                 console.error('Failed to load settings from server:', error);
             });
-    }
-
-    function loadRecordings() {
-        // Fetch recordings from the server
-        $.ajax({
-            url: '/get_recordings',
-            type: 'GET',
-            success: function(response) {
-                if (response.status === 'success') {
-                    displayRecordings(response.recordings);
-                }
-            },
-            error: function(error) {
-                console.error('Error loading recordings:', error);
-            }
-        });
-    }
-
-    function displayRecordings(recordings) {
-        const recordingsList = $('#recordings-list');
-        recordingsList.empty();
-        
-        if (recordings.length === 0) {
-            recordingsList.append('<div class="list-group-item">No recordings found</div>');
-            return;
-        }
-        
-        // Add each recording to the list
-        recordings.forEach(function(recording) {
-            const recordingItem = `
-                <div class="list-group-item">
-                    <div class="d-flex justify-content-between align-items-center">
-                        <div>
-                            <div class="recording-name">${recording.name}</div>
-                            <div class="recording-info">${recording.modified} - ${recording.size}</div>
-                        </div>
-                    </div>
-                </div>
-            `;
-            recordingsList.append(recordingItem);
-        });
     }
 
     // Initialize with default UI state

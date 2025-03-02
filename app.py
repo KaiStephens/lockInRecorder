@@ -91,24 +91,24 @@ def add_timestamp_to_frame(frame):
     current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     height, width = frame.shape[:2]
     
-    # Calculate position (bottom left with padding)
-    x = width // 2 - 200  # Move to the middle-left of the frame
-    y = height - 30  # 30px from bottom
+    # Calculate position (bottom right with some padding)
+    x = width - 300  # Adjust based on text length
+    y = height - 20  # 20px from bottom
     
     # Add a semi-transparent background for better visibility
     overlay = frame.copy()
-    cv2.rectangle(overlay, (x-20, y-40), (x + 380, height-10), (0, 0, 0), -1)
-    cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+    cv2.rectangle(overlay, (x-10, y-25), (width-10, height-10), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
     
-    # Add text with larger font
+    # Add text
     cv2.putText(
         frame, 
         current_time, 
         (x, y), 
         cv2.FONT_HERSHEY_SIMPLEX, 
-        1.2,  # Increased font scale from 0.7 to 1.2
+        0.7,  # Font scale
         (255, 255, 255),  # White color
-        2,  # Increased thickness from 1 to 2
+        1,  # Thickness
         cv2.LINE_AA
     )
 
@@ -220,7 +220,7 @@ def start_recording():
     recording_filename = os.path.join(output_dir, f"lockin-{timestamp}.mp4")  # Changed to .mp4
     
     # Initialize the video writer
-    fourcc = cv2.VideoWriter_fourcc(*'avc1')  # Changed to AVC1 codec for better compatibility
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Changed to MP4V codec
     video_writer = cv2.VideoWriter(recording_filename, fourcc, recording_fps, recording_resolution)
     
     # Reset frame count and start time
@@ -313,37 +313,6 @@ def load_settings_route():
     """API endpoint to load settings"""
     settings = load_settings()
     return jsonify({"status": "success", "settings": settings})
-
-@app.route('/get_recordings', methods=['GET'])
-def get_recordings():
-    """API endpoint to get list of recent recordings"""
-    global output_path
-    recordings = []
-    
-    try:
-        if os.path.exists(output_path):
-            # Get all mp4 files in the recordings directory
-            files = [f for f in os.listdir(output_path) if f.endswith('.mp4')]
-            
-            # Sort by modification time (newest first)
-            files.sort(key=lambda x: os.path.getmtime(os.path.join(output_path, x)), reverse=True)
-            
-            # Get file information
-            for file in files:
-                file_path = os.path.join(output_path, file)
-                timestamp = os.path.getmtime(file_path)
-                size = os.path.getsize(file_path) / (1024 * 1024)  # Convert to MB
-                
-                recordings.append({
-                    "name": file,
-                    "path": file_path,
-                    "modified": datetime.datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S"),
-                    "size": f"{size:.2f} MB"
-                })
-    except Exception as e:
-        print(f"Error getting recordings: {e}")
-    
-    return jsonify({"status": "success", "recordings": recordings})
 
 if __name__ == '__main__':
     try:

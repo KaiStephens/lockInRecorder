@@ -1,1 +1,1 @@
-{"fps": 2, "resolution": "1920x1080", "convertToOneMinute": true, "outputDirectory": "recordings"}
+{"fps": 2, "resolution": "1920x1080", "convertToOneMinute": true, "outputDirectory": "recordings", "timestampPosition": "top-right", "timestampSize": "1.2", "timestampEnabled": true}
