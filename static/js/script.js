@@ -25,6 +25,7 @@ document.addEventListener('DOMContentLoaded', function() {
     let recordingTimer = null;
     let recentRecordings = [];
     let clockTimer = null;
+    let statusCheckTimer = null;
 
     // Start the clock
     startClock();
@@ -37,6 +38,15 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Check current recording state with the server
     checkRecordingStatus();
+    
+    // Set up periodic status checks
+    statusCheckTimer = setInterval(checkRecordingStatus, 5000);
+    
+    // Set up event listener for page unload
+    window.addEventListener('beforeunload', function() {
+        // Don't stop the recording when leaving the page
+        console.log('Page is being unloaded, but recording will continue if active');
+    });
 
     // Function to start the clock
     function startClock() {
@@ -55,27 +65,62 @@ document.addEventListener('DOMContentLoaded', function() {
     // Function to check the current recording status with the server
     function checkRecordingStatus() {
         console.log('Checking recording status with server...');
-        // Add a simple ping to make sure the UI state matches server state
-        fetch('/stop_recording', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({})
-        })
-        .then(response => response.json())
-        .then(data => {
-            console.log('Initial recording status check:', data);
-            // If we get "Not recording" error, that's good - we want to start in non-recording state
-            isRecording = (data.status === 'success');
-            updateUI(isRecording);
-        })
-        .catch(error => {
-            console.error('Error checking recording status:', error);
-            // Default to not recording in case of error
-            isRecording = false;
-            updateUI(false);
-        });
+        
+        // First, try the dedicated status endpoint
+        fetch('/check_recording_status')
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    console.log('Recording status:', data.recording ? 'Recording' : 'Not recording');
+                    
+                    if (data.recording) {
+                        // Server is recording, update UI
+                        isRecording = true;
+                        
+                        // If we don't have a start time, calculate it from elapsed time
+                        if (!recordingStartTime) {
+                            recordingStartTime = new Date() - (data.elapsed * 1000);
+                            startTimer();
+                        }
+                    } else {
+                        // Server is not recording
+                        isRecording = false;
+                        
+                        // Reset timer if needed
+                        if (recordingStartTime) {
+                            stopTimer();
+                            recordingStartTime = null;
+                        }
+                    }
+                    
+                    updateUI(isRecording);
+                }
+            })
+            .catch(error => {
+                console.error('Error checking recording status:', error);
+                
+                // Fallback to the stop_recording endpoint in case the new endpoint is not available
+                fetch('/stop_recording', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({})
+                })
+                .then(response => response.json())
+                .then(data => {
+                    console.log('Fallback recording status check:', data);
+                    // If we get "Not recording" error, we're not recording
+                    isRecording = !(data.status === 'error' && data.message === 'Not recording');
+                    updateUI(isRecording);
+                })
+                .catch(err => {
+                    console.error('Error in fallback recording status check:', err);
+                    // Default to not recording in case of error
+                    isRecording = false;
+                    updateUI(false);
+                });
+            });
     }
 
     // Load saved settings
@@ -158,10 +203,10 @@ document.addEventListener('DOMContentLoaded', function() {
         .then(data => {
             if (data.status === 'success') {
                 isRecording = true;
-                recordingStartTime = Date.now();
+                recordingStartTime = new Date();
                 updateUI(true);
                 startTimer();
-                showToast('Recording Started', 'Recording to ' + data.filename, 'success');
+                showToast('Success', 'Recording started!', 'success');
             } else {
                 showToast('Error', data.message, 'error');
             }
@@ -173,26 +218,6 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Stop recording
     stopRecordingBtn.addEventListener('click', function() {
-        // Add debugging
-        console.log('Stop recording button clicked');
-
-        // Show immediate UI feedback
-        isRecording = false;
-        stopTimer();
-        updateUI(false);
-        showToast('Processing', 'Stopping recording...', 'info');
-        
-        // Set a timeout as a failsafe - if the server doesn't respond in 10 seconds,
-        // we'll assume recording has stopped anyway
-        const failsafeTimeout = setTimeout(() => {
-            console.log('Failsafe timeout triggered');
-            if (isRecording) {
-                isRecording = false;
-                updateUI(false);
-                showToast('Warning', 'Recording may have stopped, but server did not respond.', 'error');
-            }
-        }, 10000);
-        
         fetch('/stop_recording', {
             method: 'POST',
             headers: {
@@ -200,46 +225,21 @@ document.addEventListener('DOMContentLoaded', function() {
             },
             body: JSON.stringify({})
         })
-        .then(response => {
-            console.log('Stop recording response received:', response);
-            clearTimeout(failsafeTimeout);
-            return response.json();
-        })
+        .then(response => response.json())
         .then(data => {
-            console.log('Stop recording data:', data);
             if (data.status === 'success') {
-                // We already updated UI immediately for better responsiveness
+                isRecording = false;
+                updateUI(false);
+                stopTimer();
+                showToast('Success', 'Recording stopped!', 'success');
                 
-                // Add to recent recordings list
-                const recordingItem = {
-                    filename: data.filename,
-                    duration: getElapsedTimeFormatted(recordingStartTime, Date.now()),
-                    timestamp: new Date().toLocaleString(),
-                    converted: data.converted
-                };
-                
-                recentRecordings.unshift(recordingItem);
-                if (recentRecordings.length > 10) {
-                    recentRecordings.pop();
-                }
-                
-                // Save the updated recordings list
-                saveRecentRecordings();
-                
-                updateRecordingsList();
-                
-                if (data.converted) {
-                    showToast('Recording Complete', 'Video converted to 1 minute duration!', 'success');
-                } else {
-                    showToast('Recording Complete', 'Recording saved!', 'success');
-                }
+                // Refresh the recordings list
+                setTimeout(fetchRecordingsFromServer, 1000); // Wait a second for the file to be processed
             } else {
                 showToast('Error', data.message, 'error');
             }
         })
         .catch(error => {
-            console.error('Stop recording error:', error);
-            clearTimeout(failsafeTimeout);
             showToast('Error', 'Failed to stop recording: ' + error, 'error');
         });
     });

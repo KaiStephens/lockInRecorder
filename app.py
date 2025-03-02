@@ -30,6 +30,7 @@ standalone_mode = False
 video_writer = None
 settings_file = "settings.json"
 exit_event = threading.Event()
+client_connected = False  # Track if any client is connected
 
 def cleanup_resources():
     """Clean up all resources before exiting"""
@@ -171,7 +172,7 @@ def add_timestamp_to_frame(frame):
     return frame
 
 def generate_frames():
-    global output_frame, camera, recording, video_writer, frame_count, recording_resolution
+    global output_frame, camera, recording, video_writer, frame_count, recording_resolution, client_connected
     
     error_count = 0
     max_errors = 5  # Maximum number of consecutive errors before reinitializing camera
@@ -194,6 +195,9 @@ def generate_frames():
                                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                         ret, buffer = cv2.imencode('.jpg', blank_frame)
                         frame_bytes = buffer.tobytes()
+                        
+                        # Set client as connected when they receive frames
+                        client_connected = True
                         
                         yield (b'--frame\r\n'
                                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
@@ -225,6 +229,9 @@ def generate_frames():
                 ret, buffer = cv2.imencode('.jpg', blank_frame)
                 frame_bytes = buffer.tobytes()
                 
+                # Set client as connected when they receive frames
+                client_connected = True
+                
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
                 continue
@@ -246,6 +253,9 @@ def generate_frames():
             
             with lock:
                 output_frame = frame_bytes
+            
+            # Set client as connected when they receive frames
+            client_connected = True
             
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
@@ -346,8 +356,23 @@ def index():
 
 @app.route('/video_feed')
 def video_feed():
+    """Video streaming route. Get this in an img src attribute."""
     return Response(generate_frames(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/check_recording_status')
+def check_recording_status():
+    """Check if recording is active and update client_connected status"""
+    global client_connected
+    
+    # Mark client as connected
+    client_connected = True
+    
+    return jsonify({
+        "status": "success",
+        "recording": recording,
+        "elapsed": time.time() - start_time if recording else 0
+    })
 
 def start_recording_func(output_dir=None, fps=None, width=None, height=None, convert=None):
     """Start recording video"""
@@ -372,11 +397,21 @@ def start_recording_func(output_dir=None, fps=None, width=None, height=None, con
     
     # Generate filename with timestamp
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    recording_filename = f"{output_path}/recording_{timestamp}.avi"
+    recording_filename = f"{output_path}/recording_{timestamp}.mp4"
     
     try:
-        # Create VideoWriter object
-        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+        # Create VideoWriter object with MP4 format
+        if sys.platform == 'darwin':  # macOS
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # mp4v for Mac
+        else:
+            # For other platforms, try H264 or fallback to XVID
+            try:
+                fourcc = cv2.VideoWriter_fourcc(*'H264')
+            except:
+                fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                # Change extension if we're using XVID
+                recording_filename = recording_filename.replace('.mp4', '.avi')
+                
         video_writer = cv2.VideoWriter(
             recording_filename, 
             fourcc, 
@@ -403,40 +438,110 @@ def start_recording_func(output_dir=None, fps=None, width=None, height=None, con
         return {"status": "error", "message": error_msg}
 
 def stop_recording_func():
-    """Functional version of stop_recording for standalone mode"""
-    global recording, video_writer, recording_filename, convert_to_one_minute
+    """Stop recording video"""
+    global recording, video_writer, recording_filename
     
     if not recording:
-        print("Not recording")
-        return None
+        return {"status": "error", "message": "Not recording"}
     
-    # Store filename before setting recording to false
-    current_filename = recording_filename
+    try:
+        recording = False
+        
+        if video_writer is not None:
+            video_writer.release()
+            video_writer = None
+        
+        print(f"Recording stopped: {recording_filename}")
+        
+        # Convert the video if needed
+        if convert_to_one_minute and os.path.exists(recording_filename):
+            output_file = recording_filename.replace('.mp4', '_1min.mp4')
+            if recording_filename.endswith('.avi'):
+                output_file = recording_filename.replace('.avi', '_1min.mp4')
+                
+            print(f"Converting {recording_filename} to 1 minute...")
+            
+            try:
+                process_video(recording_filename, output_file)
+                print(f"Conversion complete: {output_file}")
+                
+                # For AVI files, we can optionally convert them to MP4
+                if recording_filename.endswith('.avi'):
+                    print(f"Converting AVI to MP4...")
+                    convert_to_mp4(recording_filename)
+                
+            except Exception as e:
+                print(f"Error during conversion: {e}")
+        
+        return {"status": "success", "filename": recording_filename}
     
-    # Update recording state
-    recording = False
-    
-    # Close the video writer
-    if video_writer is not None:
-        video_writer.release()
-        video_writer = None
-    
-    # Default output file is the original recording
-    output_file = current_filename
-    
-    # Convert video to be exactly one minute if requested and file exists
-    if convert_to_one_minute and os.path.exists(current_filename):
+    except Exception as e:
+        error_msg = f"Error stopping recording: {str(e)}"
+        print(error_msg)
+        return {"status": "error", "message": error_msg}
+
+# New function to convert AVI to MP4
+def convert_to_mp4(input_file):
+    """Convert an AVI file to MP4 format"""
+    if not input_file.endswith('.avi'):
+        return
+        
+    try:
+        output_file = input_file.replace('.avi', '.mp4')
+        
+        # Check if ffmpeg is available
         try:
-            base, ext = os.path.splitext(current_filename)
-            output_file = f"{base}_1min{ext}"
-            process_video(current_filename, output_file)
-        except Exception as e:
-            print(f"Error converting video: {e}")
-            # If conversion fails, use the original file
-            output_file = current_filename
-    
-    print(f"Recording stopped: {output_file}")
-    return output_file
+            subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            has_ffmpeg = True
+        except:
+            has_ffmpeg = False
+            
+        if has_ffmpeg:
+            # Use ffmpeg for conversion
+            cmd = [
+                'ffmpeg',
+                '-i', input_file,
+                '-c:v', 'libx264',
+                '-preset', 'fast',
+                '-crf', '22',
+                '-y',
+                output_file
+            ]
+            
+            print(f"Running ffmpeg conversion: {' '.join(cmd)}")
+            subprocess.run(cmd, check=True)
+            print(f"Converted {input_file} to {output_file}")
+            
+            # Optionally delete the original file
+            # os.remove(input_file)
+        else:
+            print("ffmpeg not found, using OpenCV for conversion")
+            # Use OpenCV for conversion
+            cap = cv2.VideoCapture(input_file)
+            if not cap.isOpened():
+                raise Exception("Could not open input file")
+                
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(output_file, fourcc, fps, (width, height))
+            
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                out.write(frame)
+                
+            cap.release()
+            out.release()
+            print(f"Converted {input_file} to {output_file}")
+            
+            # Optionally delete the original file
+            # os.remove(input_file)
+    except Exception as e:
+        print(f"Error converting to MP4: {e}")
 
 @app.route('/start_recording', methods=['POST'])
 def start_recording():
@@ -963,67 +1068,73 @@ def serve_recording(filename):
     if not os.path.exists(file_path):
         return "File not found", 404
     
+    # Determine the correct MIME type
+    mime_type = 'video/mp4'
+    if filename.endswith('.avi'):
+        mime_type = 'video/x-msvideo'
+    
     # Serve the file
     return Response(
         open(file_path, 'rb'),
-        mimetype='video/mp4' if filename.endswith('.mp4') else 'video/x-msvideo',
-        headers={"Content-Disposition": f"inline; filename={filename}"}
+        mimetype=mime_type,
+        headers={
+            "Content-Disposition": f"inline; filename={filename}",
+            "Accept-Ranges": "bytes"  # Enable seeking in video player
+        }
     )
 
 if __name__ == '__main__':
     # Parse command-line arguments
-    parser = argparse.ArgumentParser(description='LockIn Recorder')
-    parser.add_argument('--web', action='store_true', help='Run in web UI mode')
-    parser.add_argument('--headless', action='store_true', help='Run in headless mode (no GUI)')
-    parser.add_argument('--fps', type=int, help='Frames per second for recording')
-    parser.add_argument('--resolution', type=str, help='Resolution in format WIDTHxHEIGHT (e.g., 1920x1080)')
-    parser.add_argument('--convert', type=bool, help='Convert recordings to 1 minute')
-    parser.add_argument('--output', type=str, help='Output directory for recordings')
-    
+    parser = argparse.ArgumentParser(description='LockIn Recorder - Record and convert videos')
+    parser.add_argument('--standalone', action='store_true', help='Run in standalone mode (no web interface)')
+    parser.add_argument('--headless', action='store_true', help='Run without GUI (for standalone mode)')
+    parser.add_argument('--output', type=str, default='recordings', help='Output directory for recordings')
+    parser.add_argument('--fps', type=int, default=2, help='Recording FPS')
+    parser.add_argument('--width', type=int, default=1920, help='Recording width')
+    parser.add_argument('--height', type=int, default=1080, help='Recording height')
+    parser.add_argument('--no-convert', action='store_true', help="Don't convert recordings to 1 minute")
+    parser.add_argument('--port', type=int, default=5000, help='Port for web interface')
+    parser.add_argument('--host', type=str, default='0.0.0.0', help='Host for web interface')
     args = parser.parse_args()
     
+    # Update global settings
+    output_path = args.output
+    recording_fps = args.fps
+    recording_resolution = (args.width, args.height)
+    convert_to_one_minute = not args.no_convert
+    headless_mode = args.headless
+    
+    # Create output directory
+    os.makedirs(output_path, exist_ok=True)
+    
+    # Initialize camera once at startup
+    init_camera()
+        
     try:
-        # Load settings before starting
-        load_settings()
-        
-        # Override settings with command-line arguments if provided
-        if args.fps:
-            recording_fps = args.fps
-        if args.resolution:
-            width, height = map(int, args.resolution.split('x'))
-            recording_resolution = (width, height)
-        if args.convert is not None:
-            convert_to_one_minute = args.convert
-        if args.output:
-            output_path = args.output
-        
-        if args.web:
-            # Web UI mode
-            print("Starting LockIn Recorder in Web UI mode")
-            print(f"Open your browser to http://127.0.0.1:5000")
+        # Run in either standalone or web mode
+        if args.standalone:
+            standalone_mode = True
+            print("LockIn Recorder - Standalone Mode")
             print(f"FPS: {recording_fps}")
             print(f"Resolution: {recording_resolution[0]}x{recording_resolution[1]}")
             print(f"Convert to 1 minute: {convert_to_one_minute}")
             print(f"Output directory: {output_path}")
-            print("Press Ctrl+C to exit")
-            
-            # Initialize camera
-            init_camera()
-            
-            # Ensure output directory exists
-            os.makedirs(output_path, exist_ok=True)
-            
-            # Run the Flask app
-            app.run(debug=True, threaded=True, use_reloader=False)
-        else:
-            # Standalone mode
+            print(f"Headless mode: {headless_mode}")
             run_standalone_mode(args)
+        else:
+            # Web mode
+            print("LockIn Recorder - Web Mode")
+            print(f"FPS: {recording_fps}")
+            print(f"Resolution: {recording_resolution[0]}x{recording_resolution[1]}")
+            print(f"Convert to 1 minute: {convert_to_one_minute}")
+            print(f"Output directory: {output_path}")
+            print(f"Access the web interface at http://localhost:{args.port}")
+            app.run(debug=False, host=args.host, port=args.port, threaded=True)
     except KeyboardInterrupt:
-        # This will catch Ctrl+C if the signal handler doesn't
-        print("\nKeyboard interrupt detected. Shutting down...")
-        exit_event.set()
+        print("\nReceived interrupt, shutting down...")
     except Exception as e:
-        print(f"Unhandled exception: {e}")
+        print(f"Error in main: {e}")
     finally:
-        # Always clean up resources
-        cleanup_resources() 
+        # Clean up resources
+        cleanup_resources()
+        print("LockIn Recorder shutdown complete") 
