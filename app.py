@@ -24,31 +24,109 @@ start_time = 0
 frame_count = 0
 recording_fps = 2
 recording_resolution = (1920, 1080)  # Changed default to 1920x1080
+headless_mode = False  # New variable for headless mode
 convert_to_one_minute = True
 standalone_mode = False
 video_writer = None
 settings_file = "settings.json"
 exit_event = threading.Event()
 
+def cleanup_resources():
+    """Clean up all resources before exiting"""
+    global camera, video_writer
+    
+    # Stop recording if active
+    if recording:
+        try:
+            stop_recording_func()
+        except Exception as e:
+            print(f"Error stopping recording during cleanup: {e}")
+    
+    # Release video writer if it exists
+    if video_writer is not None:
+        try:
+            video_writer.release()
+        except Exception as e:
+            print(f"Error releasing video writer: {e}")
+    
+    # Release camera if it exists
+    if camera is not None:
+        try:
+            camera.release()
+        except Exception as e:
+            print(f"Error releasing camera: {e}")
+    
+    # Close all OpenCV windows if not in headless mode
+    if not headless_mode:
+        try:
+            cv2.destroyAllWindows()
+        except Exception as e:
+            print(f"Error closing windows: {e}")
+    
+    print("All resources cleaned up")
+
 def signal_handler(sig, frame):
     """Handle Ctrl+C to gracefully exit the program"""
-    print("\nShutting down...")
+    print("\nReceived signal to shutdown...")
     exit_event.set()
-    if recording:
-        stop_recording_func()
-    if camera is not None:
-        camera.release()
+    
+    # Give threads a moment to notice the exit event
+    time.sleep(0.5)
+    
+    # Clean up resources
+    cleanup_resources()
+    
+    print("LockIn Recorder shutdown complete")
     sys.exit(0)
 
 # Register the signal handler
 signal.signal(signal.SIGINT, signal_handler)
 
 def init_camera():
-    global camera
-    camera = cv2.VideoCapture(0)
-    camera.set(cv2.CAP_PROP_FRAME_WIDTH, recording_resolution[0])
-    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, recording_resolution[1])
-    return camera
+    """Initialize the camera with the current resolution settings"""
+    global camera, recording_resolution
+    
+    try:
+        # Release any existing camera first
+        if camera is not None:
+            camera.release()
+            time.sleep(1)  # Give the camera time to properly release
+        
+        # Try to open the camera
+        camera = cv2.VideoCapture(0)
+        
+        if not camera.isOpened():
+            print("Warning: Could not open camera with index 0")
+            # Try an alternative camera index
+            camera.release()
+            camera = cv2.VideoCapture(1)
+            
+            if not camera.isOpened():
+                print("Error: Could not initialize any camera!")
+                return None
+        
+        # Set camera properties
+        camera.set(cv2.CAP_PROP_FRAME_WIDTH, recording_resolution[0])
+        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, recording_resolution[1])
+        
+        # Verify if camera is working by trying to read a frame
+        success, _ = camera.read()
+        if not success:
+            print("Error: Camera opened but could not read frame")
+            camera.release()
+            return None
+            
+        print(f"Camera initialized successfully with resolution {recording_resolution[0]}x{recording_resolution[1]}")
+        return camera
+        
+    except Exception as e:
+        print(f"Error initializing camera: {e}")
+        if camera is not None:
+            try:
+                camera.release()
+            except:
+                pass
+        return None
 
 def generate_frames():
     global output_frame, camera, recording, video_writer, frame_count
@@ -456,9 +534,10 @@ def get_recordings():
 
 def run_standalone_mode(args):
     """Run the application in standalone mode without web UI"""
-    global recording_fps, recording_resolution, convert_to_one_minute, output_path, standalone_mode
+    global recording_fps, recording_resolution, convert_to_one_minute, output_path, standalone_mode, headless_mode
     
     standalone_mode = True
+    headless_mode = args.headless  # Set headless mode from command line arg
     
     # Load settings
     load_settings()
@@ -479,6 +558,7 @@ def run_standalone_mode(args):
     print(f"Resolution: {recording_resolution[0]}x{recording_resolution[1]}")
     print(f"Convert to 1 minute: {convert_to_one_minute}")
     print(f"Output directory: {output_path}")
+    print(f"Headless mode: {headless_mode}")
     
     # Initialize camera
     if init_camera() is None or not camera.isOpened():
@@ -490,124 +570,309 @@ def run_standalone_mode(args):
     camera_thread.daemon = True
     camera_thread.start()
     
+    # Print controls
+    print("\nControls:")
+    if not headless_mode:
+        print("- Press Space in camera window to start/stop recording")
+        print("- Press ESC in camera window to quit")
+    print("- Type 'r' and press Enter to start recording")
+    print("- Press Enter to stop recording when prompted")
+    print("- Type 'q' and press Enter to quit")
+    
     # Main command loop
     while not exit_event.is_set():
         try:
             if recording:
-                command = input("\nPress Enter to stop recording, or 'q' to quit: ")
+                command = input("\nRecording... Press Enter to stop, or 'q' to quit: ")
                 if command.lower() == 'q':
                     if recording:
                         stop_recording_func()
                     break
                 else:
-                    stop_recording_func()
+                    output_file = stop_recording_func()
+                    if output_file:
+                        print(f"Recording saved to: {output_file}")
             else:
-                command = input("\nEnter 'r' to start recording, or 'q' to quit: ")
+                command = input("\nEnter 'r' to start recording, 's' for settings, or 'q' to quit: ")
                 if command.lower() == 'q':
                     break
                 elif command.lower() == 'r':
-                    start_recording_func()
+                    success = start_recording_func()
+                    if success:
+                        print(f"Recording started!")
+                elif command.lower() == 's':
+                    show_and_update_settings()
         except Exception as e:
             print(f"Error: {e}")
     
     # Clean up
-    if camera is not None:
-        camera.release()
+    exit_event.set()
+    time.sleep(0.5)  # Give threads time to exit
+    cleanup_resources()
     
     print("LockIn Recorder exited.")
 
+def show_and_update_settings():
+    """Show and update settings in the terminal"""
+    global recording_fps, recording_resolution, convert_to_one_minute, output_path
+    
+    print("\nCurrent Settings:")
+    print(f"1. FPS: {recording_fps}")
+    print(f"2. Resolution: {recording_resolution[0]}x{recording_resolution[1]}")
+    print(f"3. Convert to 1 minute: {convert_to_one_minute}")
+    print(f"4. Output directory: {output_path}")
+    print("0. Back to main menu")
+    
+    try:
+        choice = input("\nEnter number to change setting (0-4): ")
+        if choice == '1':
+            new_fps = input(f"Enter new FPS (current: {recording_fps}): ")
+            recording_fps = int(new_fps)
+            print(f"FPS updated to {recording_fps}")
+        elif choice == '2':
+            print("Available resolutions:")
+            print("1. 640x480")
+            print("2. 1280x720")
+            print("3. 1920x1080")
+            res_choice = input("Choose resolution (1-3): ")
+            if res_choice == '1':
+                recording_resolution = (640, 480)
+            elif res_choice == '2':
+                recording_resolution = (1280, 720)
+            elif res_choice == '3':
+                recording_resolution = (1920, 1080)
+            print(f"Resolution updated to {recording_resolution[0]}x{recording_resolution[1]}")
+        elif choice == '3':
+            new_value = input(f"Convert to 1 minute? (y/n, current: {'y' if convert_to_one_minute else 'n'}): ")
+            convert_to_one_minute = new_value.lower() == 'y'
+            print(f"Convert to 1 minute set to {convert_to_one_minute}")
+        elif choice == '4':
+            new_dir = input(f"Enter new output directory (current: {output_path}): ")
+            if new_dir:
+                output_path = new_dir
+                os.makedirs(output_path, exist_ok=True)
+                print(f"Output directory updated to {output_path}")
+        
+        # Save settings
+        settings = {
+            'fps': recording_fps,
+            'resolution': f"{recording_resolution[0]}x{recording_resolution[1]}",
+            'convertToOneMinute': convert_to_one_minute,
+            'outputDirectory': output_path
+        }
+        save_settings(settings)
+        print("Settings saved")
+        
+    except Exception as e:
+        print(f"Error updating settings: {e}")
+
 def standalone_camera_loop():
     """Camera processing loop for standalone mode"""
-    global camera, recording, video_writer, frame_count
+    global camera, recording, video_writer, frame_count, headless_mode
+    
+    # Keep track of consecutive errors
+    error_count = 0
+    max_errors = 5
+    
+    # Create a window if not in headless mode
+    window_created = False
+    if not headless_mode:
+        try:
+            cv2.namedWindow('LockIn Recorder', cv2.WINDOW_NORMAL)
+            window_created = True
+        except Exception as e:
+            print(f"Warning: Could not create window: {e}")
+            print("Falling back to headless mode")
+            headless_mode = True
+    
+    # Record last frame save time for periodic status updates in headless mode
+    last_status_time = time.time()
     
     while not exit_event.is_set():
         try:
+            # Check if camera is properly initialized
             if camera is None or not camera.isOpened():
                 print("Camera disconnected, attempting to reconnect...")
-                time.sleep(1)
-                init_camera()
+                
+                # Properly release camera if it exists but is not opened
+                if camera is not None:
+                    camera.release()
+                    camera = None
+                
+                # Wait before trying to reconnect
+                time.sleep(2)
+                
+                # Try to initialize the camera
+                camera = init_camera()
+                if camera is None or not camera.isOpened():
+                    print("Failed to initialize camera. Retrying in 5 seconds...")
+                    time.sleep(5)
                 continue
             
+            # Reset error count if we successfully get here
+            error_count = 0
+            
+            # Read frame with timeout protection
             success, frame = camera.read()
             if not success:
                 print("Failed to get frame from camera")
-                time.sleep(0.1)
+                time.sleep(0.5)
                 continue
             
             current_time = time.time()
             
-            # For display, show the current time on the frame
-            display_frame = frame.copy()
-            cv2.putText(
-                display_frame,
-                datetime.datetime.now().strftime("%H:%M:%S"),
-                (20, display_frame.shape[0] - 20),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.2,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA
-            )
-            
             # If recording, save frames at specified FPS
             if recording:
-                elapsed_time = current_time - start_time
-                if frame_count == 0 or elapsed_time >= (frame_count / recording_fps):
-                    with lock:
-                        if video_writer is not None:
-                            video_writer.write(frame)
-                            frame_count += 1
+                try:
+                    elapsed_time = current_time - start_time
+                    if frame_count == 0 or elapsed_time >= (frame_count / recording_fps):
+                        with lock:
+                            if video_writer is not None:
+                                video_writer.write(frame)
+                                frame_count += 1
+                    
+                    # Print status update in headless mode
+                    if headless_mode and (current_time - last_status_time) >= 5:
+                        elapsed_sec = int(elapsed_time)
+                        hours = elapsed_sec // 3600
+                        minutes = (elapsed_sec % 3600) // 60
+                        seconds = elapsed_sec % 60
+                        print(f"Recording: {hours:02d}:{minutes:02d}:{seconds:02d} ({frame_count} frames captured)")
+                        last_status_time = current_time
+                        
+                except Exception as e:
+                    print(f"Error saving frame: {e}")
+            
+            # Only process display logic if not in headless mode
+            if not headless_mode and window_created:
+                try:
+                    # Make a copy of the frame for display to avoid modifying the original
+                    display_frame = frame.copy()
                 
-                # Show recording indicator
-                cv2.putText(
-                    display_frame,
-                    "REC",
-                    (20, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1,
-                    (0, 0, 255),
-                    2
-                )
-                elapsed_sec = int(elapsed_time)
-                hours = elapsed_sec // 3600
-                minutes = (elapsed_sec % 3600) // 60
-                seconds = elapsed_sec % 60
-                cv2.putText(
-                    display_frame,
-                    f"{hours:02d}:{minutes:02d}:{seconds:02d}",
-                    (20, 90),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 0, 255),
-                    2
-                )
+                    # Add time display at the bottom left
+                    try:
+                        cv2.putText(
+                            display_frame,
+                            datetime.datetime.now().strftime("%H:%M:%S"),
+                            (20, display_frame.shape[0] - 20),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            1.2,
+                            (255, 255, 255),
+                            2,
+                            cv2.LINE_AA
+                        )
+                    except Exception as e:
+                        print(f"Error adding time text: {e}")
+                    
+                    # Add recording indicator if recording
+                    if recording:
+                        try:
+                            # Add recording indicator
+                            cv2.putText(
+                                display_frame,
+                                "REC",
+                                (20, 50),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                1,
+                                (0, 0, 255),
+                                2
+                            )
+                            
+                            # Add elapsed time
+                            elapsed_time = current_time - start_time
+                            elapsed_sec = int(elapsed_time)
+                            hours = elapsed_sec // 3600
+                            minutes = (elapsed_sec % 3600) // 60
+                            seconds = elapsed_sec % 60
+                            cv2.putText(
+                                display_frame,
+                                f"{hours:02d}:{minutes:02d}:{seconds:02d}",
+                                (20, 90),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.7,
+                                (0, 0, 255),
+                                2
+                            )
+                        except Exception as e:
+                            print(f"Error adding recording indicator: {e}")
+                    
+                    # Display the frame
+                    try:
+                        cv2.imshow('LockIn Recorder', display_frame)
+                    except Exception as e:
+                        print(f"Error displaying frame: {e}")
+                        # If display fails consistently, switch to headless mode
+                        error_count += 1
+                        if error_count > 5:
+                            print("Persistent display errors. Switching to headless mode.")
+                            headless_mode = True
+                            try:
+                                cv2.destroyAllWindows()
+                            except:
+                                pass
+                            window_created = False
+                        continue
+                    
+                    # Check for key press with a short timeout
+                    try:
+                        key = cv2.waitKey(30) & 0xFF
+                        if key == 27:  # ESC key
+                            exit_event.set()
+                            break
+                        elif key == 32:  # Space key
+                            if recording:
+                                stop_recording_func()
+                                print("Recording stopped via keyboard.")
+                            else:
+                                success = start_recording_func()
+                                if success:
+                                    print("Recording started via keyboard.")
+                    except Exception as e:
+                        print(f"Error handling keyboard input: {e}")
+                
+                except Exception as e:
+                    print(f"Error in display processing: {e}")
             
-            # Display the frame
-            cv2.imshow('LockIn Recorder', display_frame)
-            
-            # Check for key press (ESC = quit, Space = start/stop recording)
-            key = cv2.waitKey(1) & 0xFF
-            if key == 27:  # ESC key
-                exit_event.set()
-                break
-            elif key == 32:  # Space key
-                if recording:
-                    stop_recording_func()
-                else:
-                    start_recording_func()
-            
-            time.sleep(0.03)  # Limit to roughly 30 FPS for display
+            # Small delay to reduce CPU usage
+            time.sleep(0.01)
             
         except Exception as e:
+            error_count += 1
             print(f"Error in camera loop: {e}")
-            time.sleep(0.1)
+            
+            # If we have too many consecutive errors, try to reinitialize the camera
+            if error_count > max_errors:
+                print("Too many consecutive errors. Reinitializing camera...")
+                try:
+                    if camera is not None:
+                        camera.release()
+                        camera = None
+                    time.sleep(2)
+                    camera = init_camera()
+                    error_count = 0
+                except Exception as reinit_error:
+                    print(f"Error reinitializing camera: {reinit_error}")
+                
+            time.sleep(0.5)
     
-    cv2.destroyAllWindows()
+    # Make sure to clean up resources
+    if not headless_mode and window_created:
+        try:
+            cv2.destroyAllWindows()
+        except:
+            pass
+    
+    try:
+        if camera is not None:
+            camera.release()
+    except:
+        pass
 
 if __name__ == '__main__':
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='LockIn Recorder')
     parser.add_argument('--web', action='store_true', help='Run in web UI mode')
+    parser.add_argument('--headless', action='store_true', help='Run in headless mode (no GUI)')
     parser.add_argument('--fps', type=int, help='Frames per second for recording')
     parser.add_argument('--resolution', type=str, help='Resolution in format WIDTHxHEIGHT (e.g., 1920x1080)')
     parser.add_argument('--convert', type=bool, help='Convert recordings to 1 minute')
@@ -626,6 +891,12 @@ if __name__ == '__main__':
         else:
             # Standalone mode
             run_standalone_mode(args)
+    except KeyboardInterrupt:
+        # This will catch Ctrl+C if the signal handler doesn't
+        print("\nKeyboard interrupt detected. Shutting down...")
+        exit_event.set()
+    except Exception as e:
+        print(f"Unhandled exception: {e}")
     finally:
-        if camera is not None:
-            camera.release() 
+        # Always clean up resources
+        cleanup_resources() 

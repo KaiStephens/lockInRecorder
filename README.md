@@ -75,11 +75,12 @@ python app.py
 2. The application will open a camera window with time displayed in the bottom left
 
 3. Controls:
-   - Press `Space` to start/stop recording
-   - Press `ESC` to exit the application
+   - Press `Space` in the camera window to start/stop recording
+   - Press `ESC` in the camera window to exit the application
    - In the terminal, enter `r` to start recording
+   - Type `s` to access settings menu
    - Press Enter to stop recording when prompted
-   - Enter `q` to quit the application
+   - Type `q` to quit the application
 
 4. Command-line options:
 ```
@@ -87,16 +88,38 @@ python app.py [options]
 
 Options:
   --web              Run in web UI mode
+  --headless         Run without GUI (useful for servers or remote environments)
   --fps FPS          Frames per second for recording
   --resolution RES   Resolution in format WIDTHxHEIGHT (e.g., 1920x1080)
   --convert BOOL     Convert recordings to 1 minute (True/False)
   --output DIR       Output directory for recordings
 ```
 
-Example:
+Examples:
 ```
+# Run with web UI
+python app.py --web
+
+# Run in headless mode (no GUI)
+python app.py --headless
+
+# Run with custom settings
 python app.py --fps 5 --resolution 1280x720 --output my_recordings
 ```
+
+### Headless Mode
+
+For environments without display support (like servers or remote terminals), you can use headless mode:
+
+```
+python app.py --headless
+```
+
+In headless mode:
+- No camera window is displayed
+- All interaction happens through the terminal
+- Recording status updates are printed periodically
+- All functionality works the same as regular standalone mode
 
 ## How It Works
 
