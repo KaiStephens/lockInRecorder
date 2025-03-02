@@ -41,9 +41,11 @@ pip install -r requirements.txt
 
 ## Usage
 
-1. Run the application:
+### Web UI Mode
+
+1. Run the application in web UI mode:
 ```
-python app.py
+python app.py --web
 ```
 
 2. Open your web browser and navigate to:
@@ -62,6 +64,39 @@ http://127.0.0.1:5000
 5. Click "Start Recording" to begin recording from your camera
 
 6. Click "Stop Recording" when finished
+
+### Standalone Mode (No Web UI)
+
+1. Run the application in standalone mode (default):
+```
+python app.py
+```
+
+2. The application will open a camera window with time displayed in the bottom left
+
+3. Controls:
+   - Press `Space` to start/stop recording
+   - Press `ESC` to exit the application
+   - In the terminal, enter `r` to start recording
+   - Press Enter to stop recording when prompted
+   - Enter `q` to quit the application
+
+4. Command-line options:
+```
+python app.py [options]
+
+Options:
+  --web              Run in web UI mode
+  --fps FPS          Frames per second for recording
+  --resolution RES   Resolution in format WIDTHxHEIGHT (e.g., 1920x1080)
+  --convert BOOL     Convert recordings to 1 minute (True/False)
+  --output DIR       Output directory for recordings
+```
+
+Example:
+```
+python app.py --fps 5 --resolution 1280x720 --output my_recordings
+```
 
 ## How It Works
 

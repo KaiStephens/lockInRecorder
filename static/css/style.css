@@ -82,8 +82,8 @@ body {
 /* Add this new section for a standalone time display */
 .time-display {
     position: absolute;
-    top: 20px;
-    right: 20px;
+    bottom: 20px;
+    left: 20px;
     background-color: rgba(0, 0, 0, 0.5);
     padding: 10px 15px;
     border-radius: 10px;

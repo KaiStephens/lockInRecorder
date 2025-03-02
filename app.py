@@ -7,6 +7,9 @@ import json
 from flask import Flask, render_template, Response, request, jsonify
 import threading
 import subprocess
+import argparse
+import signal
+import sys
 
 app = Flask(__name__)
 
@@ -22,8 +25,23 @@ frame_count = 0
 recording_fps = 2
 recording_resolution = (1920, 1080)  # Changed default to 1920x1080
 convert_to_one_minute = True
+standalone_mode = False
 video_writer = None
 settings_file = "settings.json"
+exit_event = threading.Event()
+
+def signal_handler(sig, frame):
+    """Handle Ctrl+C to gracefully exit the program"""
+    print("\nShutting down...")
+    exit_event.set()
+    if recording:
+        stop_recording_func()
+    if camera is not None:
+        camera.release()
+    sys.exit(0)
+
+# Register the signal handler
+signal.signal(signal.SIGINT, signal_handler)
 
 def init_camera():
     global camera
@@ -92,20 +110,16 @@ def generate_frames():
                 elapsed_time = current_time - start_time
                 # Calculate if we should capture this frame based on FPS
                 if frame_count == 0 or elapsed_time >= (frame_count / recording_fps):
-                    # Add timestamp to frame before saving
-                    timestamp_frame = frame.copy()
-                    add_timestamp_to_frame(timestamp_frame)
-                    
+                    # Save frame without adding timestamp
                     with lock:
                         if video_writer is not None:
-                            video_writer.write(timestamp_frame)
+                            video_writer.write(frame)
                             frame_count += 1
             
             # For display, resize to the recording resolution
             frame = cv2.resize(frame, recording_resolution)
             
-            # Add timestamp to the bottom right corner
-            add_timestamp_to_frame(frame)
+            # No longer adding timestamp to frames
             
             # Add recording indicator
             if recording:
@@ -131,29 +145,8 @@ def generate_frames():
 
 def add_timestamp_to_frame(frame):
     """Add current timestamp to the bottom right of the frame"""
-    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    height, width = frame.shape[:2]
-    
-    # Calculate position (bottom right with some padding)
-    x = width - 300  # Adjust based on text length
-    y = height - 20  # 20px from bottom
-    
-    # Add a semi-transparent background for better visibility
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (x-10, y-25), (width-10, height-10), (0, 0, 0), -1)
-    cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
-    
-    # Add text
-    cv2.putText(
-        frame, 
-        current_time, 
-        (x, y), 
-        cv2.FONT_HERSHEY_SIMPLEX, 
-        0.7,  # Font scale
-        (255, 255, 255),  # White color
-        1,  # Thickness
-        cv2.LINE_AA
-    )
+    # Removed so we don't add the timestamp to the recorded frames
+    return frame
 
 def process_video(input_file, output_file, target_duration=60):
     """Convert the recorded video to be exactly one minute"""
@@ -173,14 +166,15 @@ def process_video(input_file, output_file, target_duration=60):
     # Calculate the new fps for the output
     output_fps = original_fps * speed_multiplier
     
-    # Use ffmpeg for converting
+    # Use ffmpeg for converting with improved quality
     cmd = [
         "ffmpeg", "-i", input_file,
         "-filter:v", f"setpts={1/speed_multiplier}*PTS",
         "-r", str(output_fps),
         "-c:v", "libx264",
-        "-preset", "medium",
-        "-crf", "23",
+        "-preset", "slow",  # Better quality, slower encoding
+        "-crf", "18",       # Lower value = higher quality (18 is high quality)
+        "-pix_fmt", "yuv420p",  # Ensure compatibility
         output_file
     ]
     
@@ -238,22 +232,22 @@ def video_feed():
     return Response(generate_frames(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
-@app.route('/start_recording', methods=['POST'])
-def start_recording():
+def start_recording_func(output_dir=None, fps=None, width=None, height=None, convert=None):
+    """Functional version of start_recording for standalone mode"""
     global recording, output_path, recording_filename, start_time, frame_count
     global video_writer, recording_fps, recording_resolution, convert_to_one_minute
     
     if recording:
-        return jsonify({"status": "error", "message": "Already recording"})
+        print("Already recording")
+        return False
     
-    # Get parameters from the request
-    data = request.get_json()
-    output_dir = data.get('output_directory', output_path)
-    recording_fps = int(data.get('fps', recording_fps))
-    width = int(data.get('width', recording_resolution[0]))
-    height = int(data.get('height', recording_resolution[1]))
+    # Use provided parameters or defaults
+    output_dir = output_dir if output_dir is not None else output_path
+    recording_fps = fps if fps is not None else recording_fps
+    width = width if width is not None else recording_resolution[0]
+    height = height if height is not None else recording_resolution[1]
     recording_resolution = (width, height)
-    convert_to_one_minute = data.get('convert_to_one_minute', convert_to_one_minute)
+    convert_to_one_minute = convert if convert is not None else convert_to_one_minute
     
     try:
         # Create output directory if it doesn't exist
@@ -261,14 +255,20 @@ def start_recording():
         
         # Generate filename with timestamp
         timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        recording_filename = os.path.join(output_dir, f"lockin-{timestamp}.mp4")  # Changed to .mp4
+        recording_filename = os.path.join(output_dir, f"lockin-{timestamp}.mp4")
         
-        # Initialize the video writer
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Changed to MP4V codec
+        # Initialize the video writer with H.264 codec
+        fourcc = cv2.VideoWriter_fourcc(*'avc1')  # Use avc1 (H.264) codec which is more compatible
         video_writer = cv2.VideoWriter(recording_filename, fourcc, recording_fps, recording_resolution)
         
         if not video_writer.isOpened():
-            return jsonify({"status": "error", "message": "Failed to initialize video writer"})
+            # Fallback to another codec if avc1 fails
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            video_writer = cv2.VideoWriter(recording_filename, fourcc, recording_fps, recording_resolution)
+            
+            if not video_writer.isOpened():
+                print("Failed to initialize video writer with both avc1 and mp4v codecs")
+                return False
         
         # Reset frame count and start time
         frame_count = 0
@@ -277,16 +277,19 @@ def start_recording():
         # Start recording
         recording = True
         
-        return jsonify({"status": "success", "message": "Recording started", "filename": recording_filename})
+        print(f"Recording started: {recording_filename}")
+        return True
     except Exception as e:
-        return jsonify({"status": "error", "message": f"Failed to start recording: {str(e)}"})
+        print(f"Failed to start recording: {str(e)}")
+        return False
 
-@app.route('/stop_recording', methods=['POST'])
-def stop_recording():
+def stop_recording_func():
+    """Functional version of stop_recording for standalone mode"""
     global recording, video_writer, recording_filename, convert_to_one_minute
     
     if not recording:
-        return jsonify({"status": "error", "message": "Not recording"})
+        print("Not recording")
+        return None
     
     # Store filename before setting recording to false
     current_filename = recording_filename
@@ -313,12 +316,38 @@ def stop_recording():
             # If conversion fails, use the original file
             output_file = current_filename
     
-    return jsonify({
-        "status": "success", 
-        "message": "Recording stopped", 
-        "filename": output_file if os.path.exists(output_file) else current_filename,
-        "converted": convert_to_one_minute and os.path.exists(output_file) and output_file != current_filename
-    })
+    print(f"Recording stopped: {output_file}")
+    return output_file
+
+@app.route('/start_recording', methods=['POST'])
+def start_recording():
+    data = request.get_json()
+    output_dir = data.get('output_directory', output_path)
+    fps = int(data.get('fps', recording_fps))
+    width = int(data.get('width', recording_resolution[0]))
+    height = int(data.get('height', recording_resolution[1]))
+    convert = data.get('convert_to_one_minute', convert_to_one_minute)
+    
+    success = start_recording_func(output_dir, fps, width, height, convert)
+    
+    if success:
+        return jsonify({"status": "success", "message": "Recording started", "filename": recording_filename})
+    else:
+        return jsonify({"status": "error", "message": "Failed to start recording"})
+
+@app.route('/stop_recording', methods=['POST'])
+def stop_recording():
+    output_file = stop_recording_func()
+    
+    if output_file:
+        return jsonify({
+            "status": "success", 
+            "message": "Recording stopped", 
+            "filename": output_file,
+            "converted": convert_to_one_minute and os.path.exists(output_file) and output_file != recording_filename
+        })
+    else:
+        return jsonify({"status": "error", "message": "Not recording"})
 
 @app.route('/update_settings', methods=['POST'])
 def update_settings():
@@ -373,12 +402,230 @@ def load_settings_route():
     settings = load_settings()
     return jsonify({"status": "success", "settings": settings})
 
+@app.route('/get_recordings', methods=['GET'])
+def get_recordings():
+    """API endpoint to get a list of recordings"""
+    try:
+        recordings_dir = request.args.get('directory', output_path)
+        
+        if not os.path.exists(recordings_dir):
+            return jsonify({"status": "error", "message": f"Directory {recordings_dir} does not exist"})
+        
+        recordings = []
+        
+        # Get all mp4 files in the directory
+        for file in os.listdir(recordings_dir):
+            if file.endswith('.mp4'):
+                file_path = os.path.join(recordings_dir, file)
+                
+                # Get file stats
+                stats = os.stat(file_path)
+                
+                # Get video duration using OpenCV
+                try:
+                    cap = cv2.VideoCapture(file_path)
+                    if cap.isOpened():
+                        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                        fps = cap.get(cv2.CAP_PROP_FPS)
+                        duration = frame_count / fps if fps > 0 else 0
+                        cap.release()
+                    else:
+                        duration = 0
+                except Exception as e:
+                    print(f"Error getting video duration: {e}")
+                    duration = 0
+                
+                recordings.append({
+                    "filename": file,
+                    "path": file_path,
+                    "size": stats.st_size,
+                    "created": stats.st_ctime,
+                    "duration": duration,
+                    "converted": "_1min" in file
+                })
+        
+        # Sort by creation time, newest first
+        recordings.sort(key=lambda x: x["created"], reverse=True)
+        
+        return jsonify({
+            "status": "success", 
+            "recordings": recordings
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to get recordings: {str(e)}"})
+
+def run_standalone_mode(args):
+    """Run the application in standalone mode without web UI"""
+    global recording_fps, recording_resolution, convert_to_one_minute, output_path, standalone_mode
+    
+    standalone_mode = True
+    
+    # Load settings
+    load_settings()
+    
+    # Override settings with command-line arguments if provided
+    if args.fps:
+        recording_fps = args.fps
+    if args.resolution:
+        width, height = map(int, args.resolution.split('x'))
+        recording_resolution = (width, height)
+    if args.convert is not None:
+        convert_to_one_minute = args.convert
+    if args.output:
+        output_path = args.output
+    
+    print(f"LockIn Recorder - Standalone Mode")
+    print(f"FPS: {recording_fps}")
+    print(f"Resolution: {recording_resolution[0]}x{recording_resolution[1]}")
+    print(f"Convert to 1 minute: {convert_to_one_minute}")
+    print(f"Output directory: {output_path}")
+    
+    # Initialize camera
+    if init_camera() is None or not camera.isOpened():
+        print("Error: Could not initialize camera!")
+        return
+    
+    # Start the camera thread
+    camera_thread = threading.Thread(target=standalone_camera_loop)
+    camera_thread.daemon = True
+    camera_thread.start()
+    
+    # Main command loop
+    while not exit_event.is_set():
+        try:
+            if recording:
+                command = input("\nPress Enter to stop recording, or 'q' to quit: ")
+                if command.lower() == 'q':
+                    if recording:
+                        stop_recording_func()
+                    break
+                else:
+                    stop_recording_func()
+            else:
+                command = input("\nEnter 'r' to start recording, or 'q' to quit: ")
+                if command.lower() == 'q':
+                    break
+                elif command.lower() == 'r':
+                    start_recording_func()
+        except Exception as e:
+            print(f"Error: {e}")
+    
+    # Clean up
+    if camera is not None:
+        camera.release()
+    
+    print("LockIn Recorder exited.")
+
+def standalone_camera_loop():
+    """Camera processing loop for standalone mode"""
+    global camera, recording, video_writer, frame_count
+    
+    while not exit_event.is_set():
+        try:
+            if camera is None or not camera.isOpened():
+                print("Camera disconnected, attempting to reconnect...")
+                time.sleep(1)
+                init_camera()
+                continue
+            
+            success, frame = camera.read()
+            if not success:
+                print("Failed to get frame from camera")
+                time.sleep(0.1)
+                continue
+            
+            current_time = time.time()
+            
+            # For display, show the current time on the frame
+            display_frame = frame.copy()
+            cv2.putText(
+                display_frame,
+                datetime.datetime.now().strftime("%H:%M:%S"),
+                (20, display_frame.shape[0] - 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.2,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA
+            )
+            
+            # If recording, save frames at specified FPS
+            if recording:
+                elapsed_time = current_time - start_time
+                if frame_count == 0 or elapsed_time >= (frame_count / recording_fps):
+                    with lock:
+                        if video_writer is not None:
+                            video_writer.write(frame)
+                            frame_count += 1
+                
+                # Show recording indicator
+                cv2.putText(
+                    display_frame,
+                    "REC",
+                    (20, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (0, 0, 255),
+                    2
+                )
+                elapsed_sec = int(elapsed_time)
+                hours = elapsed_sec // 3600
+                minutes = (elapsed_sec % 3600) // 60
+                seconds = elapsed_sec % 60
+                cv2.putText(
+                    display_frame,
+                    f"{hours:02d}:{minutes:02d}:{seconds:02d}",
+                    (20, 90),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 0, 255),
+                    2
+                )
+            
+            # Display the frame
+            cv2.imshow('LockIn Recorder', display_frame)
+            
+            # Check for key press (ESC = quit, Space = start/stop recording)
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27:  # ESC key
+                exit_event.set()
+                break
+            elif key == 32:  # Space key
+                if recording:
+                    stop_recording_func()
+                else:
+                    start_recording_func()
+            
+            time.sleep(0.03)  # Limit to roughly 30 FPS for display
+            
+        except Exception as e:
+            print(f"Error in camera loop: {e}")
+            time.sleep(0.1)
+    
+    cv2.destroyAllWindows()
+
 if __name__ == '__main__':
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='LockIn Recorder')
+    parser.add_argument('--web', action='store_true', help='Run in web UI mode')
+    parser.add_argument('--fps', type=int, help='Frames per second for recording')
+    parser.add_argument('--resolution', type=str, help='Resolution in format WIDTHxHEIGHT (e.g., 1920x1080)')
+    parser.add_argument('--convert', type=bool, help='Convert recordings to 1 minute')
+    parser.add_argument('--output', type=str, help='Output directory for recordings')
+    
+    args = parser.parse_args()
+    
     try:
         # Load settings before starting
         load_settings()
-        init_camera()
-        app.run(debug=True, threaded=True)
+        
+        if args.web:
+            # Web UI mode
+            init_camera()
+            app.run(debug=True, threaded=True)
+        else:
+            # Standalone mode
+            run_standalone_mode(args)
     finally:
         if camera is not None:
             camera.release() 
