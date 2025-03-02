@@ -523,55 +523,109 @@ def load_settings_route():
 
 @app.route('/get_recordings', methods=['GET'])
 def get_recordings():
-    """API endpoint to get a list of recordings"""
+    """Get list of recordings"""
     try:
-        recordings_dir = request.args.get('directory', output_path)
-        
-        if not os.path.exists(recordings_dir):
-            return jsonify({"status": "error", "message": f"Directory {recordings_dir} does not exist"})
-        
         recordings = []
         
-        # Get all mp4 files in the directory
-        for file in os.listdir(recordings_dir):
-            if file.endswith('.mp4'):
-                file_path = os.path.join(recordings_dir, file)
-                
-                # Get file stats
-                stats = os.stat(file_path)
-                
-                # Get video duration using OpenCV
-                try:
-                    cap = cv2.VideoCapture(file_path)
-                    if cap.isOpened():
-                        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                        fps = cap.get(cv2.CAP_PROP_FPS)
-                        duration = frame_count / fps if fps > 0 else 0
-                        cap.release()
-                    else:
-                        duration = 0
-                except Exception as e:
-                    print(f"Error getting video duration: {e}")
-                    duration = 0
-                
-                recordings.append({
-                    "filename": file,
-                    "path": file_path,
-                    "size": stats.st_size,
-                    "created": stats.st_ctime,
-                    "duration": duration,
-                    "converted": "_1min" in file
-                })
+        if not os.path.exists(output_path):
+            return jsonify({"status": "success", "recordings": []})
         
-        # Sort by creation time, newest first
+        # List all video files in the output directory
+        for filename in os.listdir(output_path):
+            if filename.endswith(('.mp4', '.avi')):
+                file_path = os.path.join(output_path, filename)
+                
+                if os.path.isfile(file_path):
+                    file_stats = os.stat(file_path)
+                    created_time = file_stats.st_ctime
+                    size_bytes = file_stats.st_size
+                    
+                    # Get video duration if possible
+                    duration = 0
+                    try:
+                        cap = cv2.VideoCapture(file_path)
+                        if cap.isOpened():
+                            # Get fps and frame count
+                            fps = cap.get(cv2.CAP_PROP_FPS)
+                            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                            
+                            if fps > 0 and frame_count > 0:
+                                duration = frame_count / fps
+                        cap.release()
+                    except Exception as e:
+                        print(f"Error getting duration for {filename}: {e}")
+                    
+                    recordings.append({
+                        "filename": filename,
+                        "path": file_path,
+                        "created": created_time,
+                        "created_formatted": datetime.datetime.fromtimestamp(created_time).strftime("%Y-%m-%d %H:%M:%S"),
+                        "size": size_bytes,
+                        "size_formatted": format_file_size(size_bytes),
+                        "duration": duration,
+                        "duration_formatted": format_duration(duration)
+                    })
+        
+        # Sort by creation time (newest first)
         recordings.sort(key=lambda x: x["created"], reverse=True)
         
-        return jsonify({
-            "status": "success", 
-            "recordings": recordings
-        })
+        return jsonify({"status": "success", "recordings": recordings})
+    
     except Exception as e:
-        return jsonify({"status": "error", "message": f"Failed to get recordings: {str(e)}"})
+        return jsonify({"status": "error", "message": str(e)})
+
+@app.route('/delete_recording', methods=['POST'])
+def delete_recording():
+    """Delete a recording file"""
+    try:
+        data = request.get_json()
+        filename = data.get('filename')
+        
+        if not filename:
+            return jsonify({"status": "error", "message": "No filename provided"})
+        
+        # Security check - ensure no path traversal
+        if '..' in filename or '/' in filename:
+            return jsonify({"status": "error", "message": "Invalid filename"})
+        
+        file_path = os.path.join(output_path, filename)
+        
+        if not os.path.exists(file_path):
+            return jsonify({"status": "error", "message": "File not found"})
+        
+        os.remove(file_path)
+        
+        return jsonify({"status": "success", "message": f"File {filename} deleted successfully"})
+    
+    except Exception as e:
+        error_message = f"Error deleting file: {str(e)}"
+        print(error_message)
+        return jsonify({"status": "error", "message": error_message})
+
+def format_file_size(size_bytes):
+    """Format file size in human-readable form"""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes/1024:.1f} KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes/(1024*1024):.1f} MB"
+    else:
+        return f"{size_bytes/(1024*1024*1024):.1f} GB"
+
+def format_duration(duration):
+    """Format duration in human-readable form"""
+    if duration < 60:
+        return f"{duration:.2f} seconds"
+    elif duration < 3600:
+        minutes = int(duration / 60)
+        seconds = int(duration % 60)
+        return f"{minutes} minutes {seconds} seconds"
+    else:
+        hours = int(duration / 3600)
+        minutes = int((duration % 3600) / 60)
+        seconds = int(duration % 60)
+        return f"{hours} hours {minutes} minutes {seconds} seconds"
 
 def run_standalone_mode(args):
     """Run the application in standalone mode without web UI"""
@@ -896,6 +950,25 @@ def standalone_camera_loop():
             camera.release()
     except:
         pass
+
+@app.route('/recordings/<filename>')
+def serve_recording(filename):
+    """Serve a recording file"""
+    # Security check to prevent directory traversal
+    if '..' in filename or '/' in filename:
+        return "Invalid filename", 400
+    
+    # Check if file exists
+    file_path = os.path.join(output_path, filename)
+    if not os.path.exists(file_path):
+        return "File not found", 404
+    
+    # Serve the file
+    return Response(
+        open(file_path, 'rb'),
+        mimetype='video/mp4' if filename.endswith('.mp4') else 'video/x-msvideo',
+        headers={"Content-Disposition": f"inline; filename={filename}"}
+    )
 
 if __name__ == '__main__':
     # Parse command-line arguments

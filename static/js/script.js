@@ -296,61 +296,165 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function updateRecordingsList() {
+        if (!recordingsList) return;
+        
+        // Clear the list
         recordingsList.innerHTML = '';
+        
         if (recentRecordings.length === 0) {
-            recordingsList.innerHTML = '<li class="list-group-item">No recordings yet</li>';
+            const emptyMessage = document.createElement('li');
+            emptyMessage.className = 'list-group-item text-center';
+            emptyMessage.textContent = 'No recordings yet';
+            recordingsList.appendChild(emptyMessage);
             return;
         }
         
-        recentRecordings.forEach((recording, index) => {
-            const li = document.createElement('li');
-            li.className = 'list-group-item';
+        // Add each recording to the list
+        recentRecordings.forEach(recording => {
+            const item = document.createElement('li');
+            item.className = 'list-group-item';
+
+            // Format date
+            const date = new Date(recording.created * 1000);
+            const dateString = recording.created_formatted || date.toLocaleString();
             
-            // Create a more visually appealing recording item
-            li.innerHTML = `
-                <div class="d-flex justify-content-between align-items-center">
-                    <div>
-                        <div class="recording-name">${getFilenameFromPath(recording.filename)}</div>
-                        <div class="recording-info">
-                            <span>Duration: ${recording.duration}</span>
-                            ${recording.converted ? '<span class="badge bg-success ms-2">Converted</span>' : ''}
+            // Create recording item with details
+            item.innerHTML = `
+                <div class="d-flex justify-content-between align-items-start">
+                    <div class="recording-info">
+                        <div class="fw-bold">${recording.filename}</div>
+                        <div class="small text-muted">
+                            <span title="Duration">${recording.duration_formatted || formatDuration(recording.duration)}</span> • 
+                            <span title="Size">${recording.size_formatted || formatFileSize(recording.size)}</span> • 
+                            <span title="Created">${dateString}</span>
                         </div>
                     </div>
-                    <div>
-                        <button class="btn btn-sm btn-outline-primary play-recording" data-index="${index}">
+                    <div class="btn-group">
+                        <button class="btn btn-sm btn-primary play-recording" data-path="${recording.path}" data-filename="${recording.filename}">
                             <i class="fas fa-play"></i>
                         </button>
-                        <button class="btn btn-sm btn-outline-danger delete-recording" data-index="${index}">
+                        <button class="btn btn-sm btn-danger delete-recording" data-filename="${recording.filename}">
                             <i class="fas fa-trash"></i>
                         </button>
                     </div>
                 </div>
             `;
-            recordingsList.appendChild(li);
+            
+            recordingsList.appendChild(item);
         });
         
-        // Add event listeners for play and delete buttons
+        // Add event listeners for play buttons
         document.querySelectorAll('.play-recording').forEach(button => {
             button.addEventListener('click', function() {
-                const index = parseInt(this.getAttribute('data-index'));
-                const recording = recentRecordings[index];
-                if (recording) {
-                    // Open recording in a new tab/window
-                    window.open(recording.filename, '_blank');
-                }
+                const filename = this.getAttribute('data-filename');
+                playRecording(filename);
             });
         });
         
+        // Add event listeners for delete buttons
         document.querySelectorAll('.delete-recording').forEach(button => {
             button.addEventListener('click', function() {
-                const index = parseInt(this.getAttribute('data-index'));
-                if (confirm('Are you sure you want to delete this recording?')) {
-                    recentRecordings.splice(index, 1);
-                    saveRecentRecordings();
-                    updateRecordingsList();
+                const filename = this.getAttribute('data-filename');
+                if (confirm(`Are you sure you want to delete ${filename}?`)) {
+                    deleteRecording(filename);
                 }
             });
         });
+    }
+
+    function playRecording(filename) {
+        console.log(`Playing recording: ${filename}`);
+        
+        // Create a video player modal if it doesn't exist
+        let playerModal = document.getElementById('videoPlayerModal');
+        
+        if (!playerModal) {
+            // Create modal HTML
+            const modalHTML = `
+                <div class="modal fade" id="videoPlayerModal" tabindex="-1" aria-labelledby="videoPlayerModalLabel" aria-hidden="true">
+                    <div class="modal-dialog modal-lg">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h5 class="modal-title" id="videoPlayerModalLabel">Video Player</h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                            </div>
+                            <div class="modal-body">
+                                <div class="ratio ratio-16x9">
+                                    <video id="videoPlayer" controls>
+                                        Your browser does not support the video tag.
+                                    </video>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            // Add modal to body
+            const modalContainer = document.createElement('div');
+            modalContainer.innerHTML = modalHTML;
+            document.body.appendChild(modalContainer);
+            
+            playerModal = document.getElementById('videoPlayerModal');
+        }
+        
+        // Set the video source
+        const videoPlayer = document.getElementById('videoPlayer');
+        videoPlayer.src = `/recordings/${filename}`;
+        
+        // Show the modal
+        const modal = new bootstrap.Modal(playerModal);
+        modal.show();
+        
+        // Play the video when modal is shown
+        playerModal.addEventListener('shown.bs.modal', function () {
+            videoPlayer.play().catch(e => {
+                console.error('Error playing video:', e);
+                showToast('Error', 'Failed to play video: ' + e, 'error');
+            });
+        });
+        
+        // Stop the video when modal is hidden
+        playerModal.addEventListener('hidden.bs.modal', function () {
+            videoPlayer.pause();
+            videoPlayer.currentTime = 0;
+        });
+    }
+
+    function deleteRecording(filename) {
+        console.log(`Deleting recording: ${filename}`);
+        
+        fetch('/delete_recording', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                filename: filename
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                showToast('Success', `${filename} deleted successfully`, 'success');
+                
+                // Update the recordings list
+                fetchRecordingsFromServer();
+            } else {
+                showToast('Error', data.message, 'error');
+            }
+        })
+        .catch(error => {
+            console.error('Error deleting recording:', error);
+            showToast('Error', 'Failed to delete recording: ' + error, 'error');
+        });
+    }
+
+    function formatFileSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        else if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+        else if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+        else return (bytes / 1073741824).toFixed(1) + ' GB';
     }
 
     function getFilenameFromPath(path) {
@@ -466,39 +570,22 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function fetchRecordingsFromServer() {
+        console.log('Fetching recordings from server...');
         fetch('/get_recordings')
             .then(response => response.json())
             .then(data => {
                 if (data.status === 'success') {
-                    // Only overwrite local recordings if we got valid data from server
-                    if (data.recordings && data.recordings.length > 0) {
-                        // Convert server recordings to our format
-                        const serverRecordings = data.recordings.map(recording => {
-                            // Calculate duration in HH:MM:SS format
-                            const duration = formatDuration(recording.duration);
-                            
-                            return {
-                                filename: recording.path,
-                                duration: duration,
-                                timestamp: new Date(recording.created * 1000).toLocaleString(),
-                                converted: recording.converted
-                            };
-                        });
-                        
-                        // Merge with local recordings but avoid duplicates
-                        const mergedRecordings = [...serverRecordings];
-                        
-                        // Save and update the UI
-                        recentRecordings = mergedRecordings;
-                        saveRecentRecordings();
-                        updateRecordingsList();
-                    }
+                    console.log('Received recordings:', data.recordings);
+                    recentRecordings = data.recordings;
+                    updateRecordingsList();
                 } else {
-                    console.error('Failed to fetch recordings:', data.message);
+                    console.error('Error fetching recordings:', data.message);
+                    showToast('Error', 'Failed to fetch recordings: ' + data.message, 'error');
                 }
             })
             .catch(error => {
                 console.error('Error fetching recordings:', error);
+                showToast('Error', 'Failed to fetch recordings: ' + error, 'error');
             });
     }
 

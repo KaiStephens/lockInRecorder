@@ -2,6 +2,8 @@
 
 A Flask-based web application that allows you to record videos from your camera at a specified frame rate and optionally convert them to exactly 1 minute duration.
 
+Exmaple of usage: https://x.com/kaiostephens/status/1895316070199672837
+
 ## Features
 
 - Live camera preview in the browser
