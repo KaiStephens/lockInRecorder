@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LockIn Recorder</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container-fluid">
+        <div class="row">
+            <!-- Left Side - Camera View -->
+            <div class="col-md-8 p-0 camera-container">
+                <div class="camera-wrapper">
+                    <img src="{{ url_for('video_feed') }}" id="video-feed" alt="Camera Feed">
+                    <div id="recording-indicator" class="d-none">
+                        <span class="record-dot"></span>
+                        <span class="record-text">REC</span>
+                        <span id="recording-time">00:00</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Right Side - Controls -->
+            <div class="col-md-4 controls-sidebar">
+                <h1 class="text-center mb-4">LockIn Recorder</h1>
+                
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h5><i class="fas fa-cog"></i> Recording Settings</h5>
+                    </div>
+                    <div class="card-body">
+                        <!-- FPS Control -->
+                        <div class="mb-3">
+                            <label for="fps-range" class="form-label">FPS: <span id="fps-value">2</span></label>
+                            <input type="range" class="form-range" min="1" max="30" step="1" value="2" id="fps-range">
+                        </div>
+                        
+                        <!-- Resolution Control -->
+                        <div class="mb-3">
+                            <label for="resolution-select" class="form-label">Resolution:</label>
+                            <select class="form-select" id="resolution-select">
+                                <option value="640x480" selected>640x480</option>
+                                <option value="1280x720">1280x720</option>
+                                <option value="1920x1080">1920x1080</option>
+                            </select>
+                        </div>
+                        
+                        <!-- Convert to 1 Minute Toggle -->
+                        <div class="form-check form-switch mb-3">
+                            <input class="form-check-input" type="checkbox" id="convert-toggle" checked>
+                            <label class="form-check-label" for="convert-toggle">Convert to 1 Minute</label>
+                        </div>
+                        
+                        <!-- Output Directory -->
+                        <div class="mb-3">
+                            <label for="output-directory" class="form-label">Output Directory:</label>
+                            <input type="text" class="form-control" id="output-directory" value="recordings">
+                        </div>
+                        
+                        <button id="apply-settings" class="btn btn-secondary w-100">
+                            <i class="fas fa-save"></i> Apply Settings
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="d-grid gap-3">
+                    <button id="start-recording" class="btn btn-danger btn-lg">
+                        <i class="fas fa-record-vinyl"></i> Start Recording
+                    </button>
+                    <button id="stop-recording" class="btn btn-secondary btn-lg" disabled>
+                        <i class="fas fa-stop"></i> Stop Recording
+                    </button>
+                </div>
+                
+                <div class="mt-4">
+                    <div class="card">
+                        <div class="card-header">
+                            <h5><i class="fas fa-info-circle"></i> Recording Information</h5>
+                        </div>
+                        <div class="card-body">
+                            <div id="recording-info">
+                                <p>No recording in progress</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="mt-4">
+                    <div class="card">
+                        <div class="card-header">
+                            <h5><i class="fas fa-history"></i> Recent Recordings</h5>
+                        </div>
+                        <div class="card-body">
+                            <ul id="recordings-list" class="list-group">
+                                <!-- Recordings will be added here -->
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Toasts for notifications -->
+    <div class="toast-container position-fixed bottom-0 end-0 p-3">
+        <div id="toast" class="toast" role="alert" aria-live="assertive" aria-atomic="true">
+            <div class="toast-header">
+                <strong class="me-auto" id="toast-title">Notification</strong>
+                <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>
+            </div>
+            <div class="toast-body" id="toast-message">
+                Message will appear here
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html> 
