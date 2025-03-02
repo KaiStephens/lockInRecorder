@@ -35,13 +35,56 @@ def init_camera():
 def generate_frames():
     global output_frame, camera, recording, video_writer, frame_count
     
-    if camera is None:
-        camera = init_camera()
+    if camera is None or not camera.isOpened():
+        try:
+            camera = init_camera()
+            if not camera.isOpened():
+                print("Error: Could not initialize camera!")
+                # Return a blank frame with error message
+                blank_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(blank_frame, "Camera Error!", (200, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                ret, buffer = cv2.imencode('.jpg', blank_frame)
+                error_frame = buffer.tobytes()
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + error_frame + b'\r\n')
+                return
+        except Exception as e:
+            print(f"Camera error: {e}")
+            blank_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(blank_frame, "Camera Error!", (200, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            ret, buffer = cv2.imencode('.jpg', blank_frame)
+            error_frame = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + error_frame + b'\r\n')
+            return
     
     while True:
         success, frame = camera.read()
         if not success:
-            break
+            print("Failed to get frame from camera")
+            # Return error frame
+            blank_frame = np.zeros(recording_resolution + (3,), dtype=np.uint8)
+            cv2.putText(blank_frame, "No Camera Signal", (recording_resolution[0]//4, recording_resolution[1]//2), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            ret, buffer = cv2.imencode('.jpg', blank_frame)
+            frame = buffer.tobytes()
+            
+            with lock:
+                output_frame = frame
+            
+            yield (b'--frame\r\n'
+                  b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+            
+            # Try to reinitialize camera
+            try:
+                if camera is not None:
+                    camera.release()
+                time.sleep(1)  # Wait before retrying
+                camera = init_camera()
+            except Exception as e:
+                print(f"Failed to reinitialize camera: {e}")
+                
+            continue
         else:
             # Only save frames at the specified FPS when recording
             current_time = time.time()
@@ -212,25 +255,31 @@ def start_recording():
     recording_resolution = (width, height)
     convert_to_one_minute = data.get('convert_to_one_minute', convert_to_one_minute)
     
-    # Create output directory if it doesn't exist
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Generate filename with timestamp
-    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    recording_filename = os.path.join(output_dir, f"lockin-{timestamp}.mp4")  # Changed to .mp4
-    
-    # Initialize the video writer
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Changed to MP4V codec
-    video_writer = cv2.VideoWriter(recording_filename, fourcc, recording_fps, recording_resolution)
-    
-    # Reset frame count and start time
-    frame_count = 0
-    start_time = time.time()
-    
-    # Start recording
-    recording = True
-    
-    return jsonify({"status": "success", "message": "Recording started", "filename": recording_filename})
+    try:
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Generate filename with timestamp
+        timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        recording_filename = os.path.join(output_dir, f"lockin-{timestamp}.mp4")  # Changed to .mp4
+        
+        # Initialize the video writer
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Changed to MP4V codec
+        video_writer = cv2.VideoWriter(recording_filename, fourcc, recording_fps, recording_resolution)
+        
+        if not video_writer.isOpened():
+            return jsonify({"status": "error", "message": "Failed to initialize video writer"})
+        
+        # Reset frame count and start time
+        frame_count = 0
+        start_time = time.time()
+        
+        # Start recording
+        recording = True
+        
+        return jsonify({"status": "success", "message": "Recording started", "filename": recording_filename})
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to start recording: {str(e)}"})
 
 @app.route('/stop_recording', methods=['POST'])
 def stop_recording():
@@ -239,6 +288,10 @@ def stop_recording():
     if not recording:
         return jsonify({"status": "error", "message": "Not recording"})
     
+    # Store filename before setting recording to false
+    current_filename = recording_filename
+    
+    # Update recording state
     recording = False
     
     # Close the video writer
@@ -246,19 +299,25 @@ def stop_recording():
         video_writer.release()
         video_writer = None
     
-    output_file = recording_filename
+    # Default output file is the original recording
+    output_file = current_filename
     
-    # Convert video to be exactly one minute if requested
-    if convert_to_one_minute:
-        base, ext = os.path.splitext(recording_filename)
-        output_file = f"{base}_1min{ext}"
-        process_video(recording_filename, output_file)
+    # Convert video to be exactly one minute if requested and file exists
+    if convert_to_one_minute and os.path.exists(current_filename):
+        try:
+            base, ext = os.path.splitext(current_filename)
+            output_file = f"{base}_1min{ext}"
+            process_video(current_filename, output_file)
+        except Exception as e:
+            print(f"Error converting video: {e}")
+            # If conversion fails, use the original file
+            output_file = current_filename
     
     return jsonify({
         "status": "success", 
         "message": "Recording stopped", 
-        "filename": output_file,
-        "converted": convert_to_one_minute
+        "filename": output_file if os.path.exists(output_file) else current_filename,
+        "converted": convert_to_one_minute and os.path.exists(output_file) and output_file != current_filename
     })
 
 @app.route('/update_settings', methods=['POST'])

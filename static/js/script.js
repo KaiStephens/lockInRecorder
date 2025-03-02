@@ -18,11 +18,40 @@ document.addEventListener('DOMContentLoaded', function() {
     // Bootstrap Toast
     const toast = new bootstrap.Toast(toastElement);
 
-    // Global variables
+    // Global variables - initialize with default values
     let isRecording = false;
     let recordingStartTime = null;
     let recordingTimer = null;
     let recentRecordings = [];
+
+    // Check current recording state with the server
+    checkRecordingStatus();
+
+    // Function to check the current recording status with the server
+    function checkRecordingStatus() {
+        console.log('Checking recording status with server...');
+        // Add a simple ping to make sure the UI state matches server state
+        fetch('/stop_recording', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({})
+        })
+        .then(response => response.json())
+        .then(data => {
+            console.log('Initial recording status check:', data);
+            // If we get "Not recording" error, that's good - we want to start in non-recording state
+            isRecording = (data.status === 'success');
+            updateUI(isRecording);
+        })
+        .catch(error => {
+            console.error('Error checking recording status:', error);
+            // Default to not recording in case of error
+            isRecording = false;
+            updateUI(false);
+        });
+    }
 
     // Load saved settings
     loadSettings();
@@ -119,6 +148,26 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Stop recording
     stopRecordingBtn.addEventListener('click', function() {
+        // Add debugging
+        console.log('Stop recording button clicked');
+
+        // Show immediate UI feedback
+        isRecording = false;
+        stopTimer();
+        updateUI(false);
+        showToast('Processing', 'Stopping recording...', 'info');
+        
+        // Set a timeout as a failsafe - if the server doesn't respond in 10 seconds,
+        // we'll assume recording has stopped anyway
+        const failsafeTimeout = setTimeout(() => {
+            console.log('Failsafe timeout triggered');
+            if (isRecording) {
+                isRecording = false;
+                updateUI(false);
+                showToast('Warning', 'Recording may have stopped, but server did not respond.', 'error');
+            }
+        }, 10000);
+        
         fetch('/stop_recording', {
             method: 'POST',
             headers: {
@@ -126,12 +175,15 @@ document.addEventListener('DOMContentLoaded', function() {
             },
             body: JSON.stringify({})
         })
-        .then(response => response.json())
+        .then(response => {
+            console.log('Stop recording response received:', response);
+            clearTimeout(failsafeTimeout);
+            return response.json();
+        })
         .then(data => {
+            console.log('Stop recording data:', data);
             if (data.status === 'success') {
-                isRecording = false;
-                stopTimer();
-                updateUI(false);
+                // We already updated UI immediately for better responsiveness
                 
                 // Add to recent recordings list
                 const recordingItem = {
@@ -158,14 +210,21 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         })
         .catch(error => {
+            console.error('Stop recording error:', error);
+            clearTimeout(failsafeTimeout);
             showToast('Error', 'Failed to stop recording: ' + error, 'error');
         });
     });
 
     // Helper Functions
     function updateUI(isRecording) {
+        console.log('Updating UI, isRecording:', isRecording);
+        
+        // Make sure the buttons are properly enabled/disabled
         startRecordingBtn.disabled = isRecording;
         stopRecordingBtn.disabled = !isRecording;
+        
+        // Update other UI elements
         applySettingsBtn.disabled = isRecording;
         fpsRange.disabled = isRecording;
         resolutionSelect.disabled = isRecording;
@@ -174,9 +233,16 @@ document.addEventListener('DOMContentLoaded', function() {
         
         if (isRecording) {
             recordingIndicator.classList.remove('d-none');
+            // Also ensure the stop button is visible and enabled
+            stopRecordingBtn.classList.remove('d-none');
+            stopRecordingBtn.disabled = false;
         } else {
             recordingIndicator.classList.add('d-none');
         }
+        
+        // Debug button states
+        console.log('Start button disabled:', startRecordingBtn.disabled);
+        console.log('Stop button disabled:', stopRecordingBtn.disabled);
     }
 
     function startTimer() {
