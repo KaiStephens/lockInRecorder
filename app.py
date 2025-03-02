@@ -92,139 +92,178 @@ def init_camera():
             camera.release()
             time.sleep(1)  # Give the camera time to properly release
         
-        # Try to open the camera
-        camera = cv2.VideoCapture(0)
-        
-        if not camera.isOpened():
-            print("Warning: Could not open camera with index 0")
-            # Try an alternative camera index
-            camera.release()
-            camera = cv2.VideoCapture(1)
+        # Try multiple camera indices (0, 1, 2) to find an available camera
+        for cam_index in range(3):
+            camera = cv2.VideoCapture(cam_index)
+            if camera.isOpened():
+                print(f"Successfully opened camera with index {cam_index}")
+                
+                # Try to set the resolution (but don't fail if it doesn't work)
+                camera.set(cv2.CAP_PROP_FRAME_WIDTH, recording_resolution[0])
+                camera.set(cv2.CAP_PROP_FRAME_HEIGHT, recording_resolution[1])
+                
+                # Check what resolution we actually got
+                actual_width = camera.get(cv2.CAP_PROP_FRAME_WIDTH)
+                actual_height = camera.get(cv2.CAP_PROP_FRAME_HEIGHT)
+                print(f"Camera resolution set to: {actual_width}x{actual_height}")
+                
+                return camera
+                
+        # If we get here, no camera was successfully opened
+        print("Warning: Could not open any camera")
+        return None
             
-            if not camera.isOpened():
-                print("Error: Could not initialize any camera!")
-                return None
-        
-        # Set camera properties
-        camera.set(cv2.CAP_PROP_FRAME_WIDTH, recording_resolution[0])
-        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, recording_resolution[1])
-        
-        # Verify if camera is working by trying to read a frame
-        success, _ = camera.read()
-        if not success:
-            print("Error: Camera opened but could not read frame")
-            camera.release()
-            return None
-            
-        print(f"Camera initialized successfully with resolution {recording_resolution[0]}x{recording_resolution[1]}")
-        return camera
-        
     except Exception as e:
         print(f"Error initializing camera: {e}")
-        if camera is not None:
-            try:
-                camera.release()
-            except:
-                pass
         return None
 
-def generate_frames():
-    global output_frame, camera, recording, video_writer, frame_count
+def add_timestamp_to_frame(frame):
+    """Add timestamp to the frame"""
+    now = datetime.datetime.now()
+    timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
     
-    if camera is None or not camera.isOpened():
-        try:
-            camera = init_camera()
-            if not camera.isOpened():
-                print("Error: Could not initialize camera!")
-                # Return a blank frame with error message
-                blank_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-                cv2.putText(blank_frame, "Camera Error!", (200, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                ret, buffer = cv2.imencode('.jpg', blank_frame)
-                error_frame = buffer.tobytes()
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + error_frame + b'\r\n')
-                return
-        except Exception as e:
-            print(f"Camera error: {e}")
-            blank_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(blank_frame, "Camera Error!", (200, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-            ret, buffer = cv2.imencode('.jpg', blank_frame)
-            error_frame = buffer.tobytes()
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + error_frame + b'\r\n')
-            return
+    # Get frame dimensions
+    height, width = frame.shape[:2]
+    
+    # Create semi-transparent background for the timestamp
+    overlay = frame.copy()
+    
+    # Draw black rectangle as background for timestamp
+    cv2.rectangle(overlay, (10, height - 50), (350, height - 10), (0, 0, 0), -1)
+    
+    # Add text with timestamp
+    cv2.putText(
+        overlay,
+        timestamp,
+        (20, height - 20),
+        cv2.FONT_HERSHEY_SIMPLEX, 
+        0.8,  # Font scale
+        (255, 255, 255),  # White color
+        2,  # Thickness
+        cv2.LINE_AA
+    )
+    
+    # Add recording indicator if recording
+    if recording:
+        elapsed = time.time() - start_time
+        elapsed_sec = int(elapsed)
+        hours = elapsed_sec // 3600
+        minutes = (elapsed_sec % 3600) // 60
+        seconds = elapsed_sec % 60
+        
+        # Draw a red circle and REC text
+        cv2.circle(overlay, (width - 120, 30), 10, (0, 0, 255), -1)
+        cv2.putText(
+            overlay,
+            f"REC {hours:02d}:{minutes:02d}:{seconds:02d}",
+            (width - 100, 35),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 0, 255),
+            2,
+            cv2.LINE_AA
+        )
+    
+    # Blend the overlay with the original frame
+    alpha = 0.7  # Transparency factor
+    frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
+    
+    return frame
+
+def generate_frames():
+    global output_frame, camera, recording, video_writer, frame_count, recording_resolution
+    
+    error_count = 0
+    max_errors = 5  # Maximum number of consecutive errors before reinitializing camera
     
     while True:
-        success, frame = camera.read()
-        if not success:
-            print("Failed to get frame from camera")
-            # Return error frame
-            blank_frame = np.zeros(recording_resolution + (3,), dtype=np.uint8)
-            cv2.putText(blank_frame, "No Camera Signal", (recording_resolution[0]//4, recording_resolution[1]//2), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-            ret, buffer = cv2.imencode('.jpg', blank_frame)
-            frame = buffer.tobytes()
-            
-            with lock:
-                output_frame = frame
-            
-            yield (b'--frame\r\n'
-                  b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-            
-            # Try to reinitialize camera
-            try:
-                if camera is not None:
-                    camera.release()
-                time.sleep(1)  # Wait before retrying
+        try:
+            # Check if camera is initialized and open
+            if camera is None or not camera.isOpened():
+                print("Camera not available, trying to initialize...")
                 camera = init_camera()
-            except Exception as e:
-                print(f"Failed to reinitialize camera: {e}")
                 
-            continue
-        else:
-            # Only save frames at the specified FPS when recording
-            current_time = time.time()
-            if recording:
-                elapsed_time = current_time - start_time
-                # Calculate if we should capture this frame based on FPS
-                if frame_count == 0 or elapsed_time >= (frame_count / recording_fps):
-                    # Save frame without adding timestamp
-                    with lock:
-                        if video_writer is not None:
-                            video_writer.write(frame)
-                            frame_count += 1
+                # If still not available, return error frame
+                if camera is None or not camera.isOpened():
+                    error_count += 1
+                    if error_count > max_errors:
+                        print(f"Failed to initialize camera after {max_errors} attempts")
+                        # Create an error message frame
+                        blank_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                        cv2.putText(blank_frame, "Camera Not Available", (120, 240), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                        ret, buffer = cv2.imencode('.jpg', blank_frame)
+                        frame_bytes = buffer.tobytes()
+                        
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                        
+                        # Reset error count and sleep to avoid busy loop
+                        error_count = 0
+                        time.sleep(1)
+                    continue
             
-            # For display, resize to the recording resolution
-            frame = cv2.resize(frame, recording_resolution)
+            # Read frame from camera
+            success, frame = camera.read()
             
-            # No longer adding timestamp to frames
+            if not success:
+                error_count += 1
+                print(f"Failed to read frame, error {error_count}/{max_errors}")
+                
+                if error_count > max_errors:
+                    # Try to reinitialize camera
+                    print("Reinitializing camera due to consecutive read failures")
+                    if camera is not None:
+                        camera.release()
+                    camera = init_camera()
+                    error_count = 0
+                
+                # Create a blank frame with error message
+                blank_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(blank_frame, "Camera Signal Lost", (150, 240), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                ret, buffer = cv2.imencode('.jpg', blank_frame)
+                frame_bytes = buffer.tobytes()
+                
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                continue
             
-            # Add recording indicator
-            if recording:
-                cv2.putText(frame, "REC", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 
-                            1, (0, 0, 255), 2)
-                # Add elapsed time
-                elapsed = time.time() - start_time
-                cv2.putText(frame, f"Time: {int(elapsed)}s", (20, 90), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            # Reset error count when successful
+            error_count = 0
             
-            # Convert to jpg for streaming
+            # Add timestamp to frame
+            frame = add_timestamp_to_frame(frame)
+            
+            # If recording, write frame to video
+            if recording and video_writer is not None:
+                video_writer.write(frame)
+                frame_count += 1
+                
+            # Convert to JPEG and yield to web client
             ret, buffer = cv2.imencode('.jpg', frame)
-            frame = buffer.tobytes()
+            frame_bytes = buffer.tobytes()
             
             with lock:
-                output_frame = frame
+                output_frame = frame_bytes
             
             yield (b'--frame\r\n'
-                  b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                   
+        except Exception as e:
+            print(f"Error in generate_frames: {e}")
+            # Return an error frame
+            blank_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(blank_frame, f"Error: {str(e)[:30]}", (100, 240), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            ret, buffer = cv2.imencode('.jpg', blank_frame)
+            frame_bytes = buffer.tobytes()
             
-            # Control the streaming frame rate (independent of recording fps)
-            time.sleep(0.03)  # ~30fps for the stream
-
-def add_timestamp_to_frame(frame):
-    """Add current timestamp to the bottom right of the frame"""
-    # Removed so we don't add the timestamp to the recorded frames
-    return frame
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            
+            # Avoid busy loop on error
+            time.sleep(0.5)
 
 def process_video(input_file, output_file, target_duration=60):
     """Convert the recorded video to be exactly one minute"""
@@ -311,55 +350,57 @@ def video_feed():
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
 def start_recording_func(output_dir=None, fps=None, width=None, height=None, convert=None):
-    """Functional version of start_recording for standalone mode"""
-    global recording, output_path, recording_filename, start_time, frame_count
-    global video_writer, recording_fps, recording_resolution, convert_to_one_minute
+    """Start recording video"""
+    global recording, output_path, start_time, frame_count, recording_fps, recording_resolution
+    global video_writer, recording_filename, convert_to_one_minute
     
     if recording:
-        print("Already recording")
-        return False
+        return {"status": "error", "message": "Already recording"}
     
     # Use provided parameters or defaults
-    output_dir = output_dir if output_dir is not None else output_path
-    recording_fps = fps if fps is not None else recording_fps
-    width = width if width is not None else recording_resolution[0]
-    height = height if height is not None else recording_resolution[1]
-    recording_resolution = (width, height)
-    convert_to_one_minute = convert if convert is not None else convert_to_one_minute
+    if output_dir is not None:
+        output_path = output_dir
+    if fps is not None:
+        recording_fps = fps
+    if width is not None and height is not None:
+        recording_resolution = (width, height)
+    if convert is not None:
+        convert_to_one_minute = convert
+    
+    # Ensure output directory exists
+    os.makedirs(output_path, exist_ok=True)
+    
+    # Generate filename with timestamp
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    recording_filename = f"{output_path}/recording_{timestamp}.avi"
     
     try:
-        # Create output directory if it doesn't exist
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Generate filename with timestamp
-        timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        recording_filename = os.path.join(output_dir, f"lockin-{timestamp}.mp4")
-        
-        # Initialize the video writer with H.264 codec
-        fourcc = cv2.VideoWriter_fourcc(*'avc1')  # Use avc1 (H.264) codec which is more compatible
-        video_writer = cv2.VideoWriter(recording_filename, fourcc, recording_fps, recording_resolution)
+        # Create VideoWriter object
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+        video_writer = cv2.VideoWriter(
+            recording_filename, 
+            fourcc, 
+            recording_fps, 
+            recording_resolution
+        )
         
         if not video_writer.isOpened():
-            # Fallback to another codec if avc1 fails
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            video_writer = cv2.VideoWriter(recording_filename, fourcc, recording_fps, recording_resolution)
-            
-            if not video_writer.isOpened():
-                print("Failed to initialize video writer with both avc1 and mp4v codecs")
-                return False
+            return {"status": "error", "message": "Failed to create video writer"}
         
         # Reset frame count and start time
-        frame_count = 0
         start_time = time.time()
-        
-        # Start recording
+        frame_count = 0
         recording = True
         
         print(f"Recording started: {recording_filename}")
-        return True
+        print(f"FPS: {recording_fps}, Resolution: {recording_resolution}")
+        
+        return {"status": "success", "filename": recording_filename}
+    
     except Exception as e:
-        print(f"Failed to start recording: {str(e)}")
-        return False
+        error_msg = f"Error starting recording: {str(e)}"
+        print(error_msg)
+        return {"status": "error", "message": error_msg}
 
 def stop_recording_func():
     """Functional version of stop_recording for standalone mode"""
@@ -408,10 +449,10 @@ def start_recording():
     
     success = start_recording_func(output_dir, fps, width, height, convert)
     
-    if success:
-        return jsonify({"status": "success", "message": "Recording started", "filename": recording_filename})
+    if success['status'] == 'success':
+        return jsonify({"status": "success", "message": "Recording started", "filename": success['filename']})
     else:
-        return jsonify({"status": "error", "message": "Failed to start recording"})
+        return jsonify({"status": "error", "message": success['message']})
 
 @app.route('/stop_recording', methods=['POST'])
 def stop_recording():
@@ -598,7 +639,7 @@ def run_standalone_mode(args):
                     break
                 elif command.lower() == 'r':
                     success = start_recording_func()
-                    if success:
+                    if success['status'] == 'success':
                         print(f"Recording started!")
                 elif command.lower() == 's':
                     show_and_update_settings()
@@ -749,20 +790,8 @@ def standalone_camera_loop():
                     # Make a copy of the frame for display to avoid modifying the original
                     display_frame = frame.copy()
                 
-                    # Add time display at the bottom left
-                    try:
-                        cv2.putText(
-                            display_frame,
-                            datetime.datetime.now().strftime("%H:%M:%S"),
-                            (20, display_frame.shape[0] - 20),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            1.2,
-                            (255, 255, 255),
-                            2,
-                            cv2.LINE_AA
-                        )
-                    except Exception as e:
-                        print(f"Error adding time text: {e}")
+                    # Add time display at the bottom left using the timestamp function
+                    display_frame = add_timestamp_to_frame(display_frame)
                     
                     # Add recording indicator if recording
                     if recording:
@@ -825,7 +854,7 @@ def standalone_camera_loop():
                                 print("Recording stopped via keyboard.")
                             else:
                                 success = start_recording_func()
-                                if success:
+                                if success['status'] == 'success':
                                     print("Recording started via keyboard.")
                     except Exception as e:
                         print(f"Error handling keyboard input: {e}")
@@ -884,10 +913,35 @@ if __name__ == '__main__':
         # Load settings before starting
         load_settings()
         
+        # Override settings with command-line arguments if provided
+        if args.fps:
+            recording_fps = args.fps
+        if args.resolution:
+            width, height = map(int, args.resolution.split('x'))
+            recording_resolution = (width, height)
+        if args.convert is not None:
+            convert_to_one_minute = args.convert
+        if args.output:
+            output_path = args.output
+        
         if args.web:
             # Web UI mode
+            print("Starting LockIn Recorder in Web UI mode")
+            print(f"Open your browser to http://127.0.0.1:5000")
+            print(f"FPS: {recording_fps}")
+            print(f"Resolution: {recording_resolution[0]}x{recording_resolution[1]}")
+            print(f"Convert to 1 minute: {convert_to_one_minute}")
+            print(f"Output directory: {output_path}")
+            print("Press Ctrl+C to exit")
+            
+            # Initialize camera
             init_camera()
-            app.run(debug=True, threaded=True)
+            
+            # Ensure output directory exists
+            os.makedirs(output_path, exist_ok=True)
+            
+            # Run the Flask app
+            app.run(debug=True, threaded=True, use_reloader=False)
         else:
             # Standalone mode
             run_standalone_mode(args)
