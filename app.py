@@ -1,15 +1,17 @@
 import os
+import io
 import cv2
 import time
 import datetime
 import numpy as np
 import json
-from flask import Flask, render_template, Response, request, jsonify
+from flask import Flask, render_template, Response, request, jsonify, send_file
 import threading
 import subprocess
 import argparse
 import signal
 import sys
+import atexit  # Import atexit for clean shutdown
 
 app = Flask(__name__)
 
@@ -23,30 +25,37 @@ recording_filename = ""
 start_time = 0
 frame_count = 0
 recording_fps = 2
-recording_resolution = (1920, 1080)  # Changed default to 1920x1080
-headless_mode = False  # New variable for headless mode
+recording_resolution = (1920, 1080)
+headless_mode = False
 convert_to_one_minute = True
 standalone_mode = False
 video_writer = None
 settings_file = "settings.json"
 exit_event = threading.Event()
-client_connected = False  # Track if any client is connected
+client_connected = False
+
+# VideoWriter lock to prevent conflicts
+video_writer_lock = threading.Lock()
 
 def cleanup_resources():
     """Clean up all resources before exiting"""
-    global camera, video_writer
+    global camera, video_writer, recording
     
     # Stop recording if active
     if recording:
         try:
-            stop_recording_func()
+            with video_writer_lock:
+                stop_recording_func()
         except Exception as e:
             print(f"Error stopping recording during cleanup: {e}")
     
     # Release video writer if it exists
     if video_writer is not None:
         try:
-            video_writer.release()
+            with video_writer_lock:
+                if video_writer is not None:
+                    video_writer.release()
+                    video_writer = None
         except Exception as e:
             print(f"Error releasing video writer: {e}")
     
@@ -54,6 +63,7 @@ def cleanup_resources():
     if camera is not None:
         try:
             camera.release()
+            camera = None
         except Exception as e:
             print(f"Error releasing camera: {e}")
     
@@ -65,6 +75,9 @@ def cleanup_resources():
             print(f"Error closing windows: {e}")
     
     print("All resources cleaned up")
+
+# Register cleanup with atexit
+atexit.register(cleanup_resources)
 
 def signal_handler(sig, frame):
     """Handle Ctrl+C to gracefully exit the program"""
@@ -177,6 +190,13 @@ def generate_frames():
     error_count = 0
     max_errors = 5  # Maximum number of consecutive errors before reinitializing camera
     
+    try:
+        # Initialize the camera if needed
+        if camera is None or not camera.isOpened():
+            camera = init_camera()
+    except Exception as e:
+        print(f"Error initializing camera in generate_frames: {e}")
+    
     while True:
         try:
             # Check if camera is initialized and open
@@ -244,8 +264,13 @@ def generate_frames():
             
             # If recording, write frame to video
             if recording and video_writer is not None:
-                video_writer.write(frame)
-                frame_count += 1
+                with video_writer_lock:
+                    if video_writer is not None and video_writer.isOpened():
+                        try:
+                            video_writer.write(frame)
+                            frame_count += 1
+                        except Exception as e:
+                            print(f"Error writing frame to video: {e}")
                 
             # Convert to JPEG and yield to web client
             ret, buffer = cv2.imencode('.jpg', frame)
@@ -311,7 +336,7 @@ def process_video(input_file, output_file, target_duration=60):
     return output_file
 
 def load_settings():
-    """Load settings from file"""
+    """Load settings from JSON file"""
     global recording_fps, recording_resolution, convert_to_one_minute, output_path
     
     try:
@@ -319,29 +344,46 @@ def load_settings():
             with open(settings_file, 'r') as f:
                 settings = json.load(f)
                 
-                recording_fps = settings.get('fps', recording_fps)
-                
-                resolution = settings.get('resolution', None)
-                if resolution:
-                    width, height = resolution.split('x')
-                    recording_resolution = (int(width), int(height))
-                
-                convert_to_one_minute = settings.get('convertToOneMinute', convert_to_one_minute)
-                output_path = settings.get('outputDirectory', output_path)
-                
-                return settings
+            recording_fps = settings.get("fps", 2)
+            width = settings.get("width", 1920)
+            height = settings.get("height", 1080)
+            recording_resolution = (width, height)
+            convert_to_one_minute = settings.get("convert_to_one_minute", True)
+            output_path = settings.get("output_directory", "recordings")
+            
+            # Ensure output directory exists
+            os.makedirs(output_path, exist_ok=True)
+            
+            return settings
+        else:
+            return {
+                "fps": recording_fps,
+                "width": recording_resolution[0],
+                "height": recording_resolution[1],
+                "convert_to_one_minute": convert_to_one_minute,
+                "output_directory": output_path
+            }
     except Exception as e:
         print(f"Error loading settings: {e}")
-    
-    return {
-        'fps': recording_fps,
-        'resolution': f"{recording_resolution[0]}x{recording_resolution[1]}",
-        'convertToOneMinute': convert_to_one_minute,
-        'outputDirectory': output_path
-    }
+        return {
+            "fps": recording_fps,
+            "width": recording_resolution[0],
+            "height": recording_resolution[1],
+            "convert_to_one_minute": convert_to_one_minute,
+            "output_directory": output_path
+        }
 
-def save_settings(settings):
-    """Save settings to file"""
+def save_settings(settings=None):
+    """Save settings to JSON file"""
+    if settings is None:
+        settings = {
+            "fps": recording_fps,
+            "width": recording_resolution[0],
+            "height": recording_resolution[1],
+            "convert_to_one_minute": convert_to_one_minute,
+            "output_directory": output_path
+        }
+    
     try:
         with open(settings_file, 'w') as f:
             json.dump(settings, f)
@@ -379,125 +421,133 @@ def start_recording_func(output_dir=None, fps=None, width=None, height=None, con
     global recording, output_path, start_time, frame_count, recording_fps, recording_resolution
     global video_writer, recording_filename, convert_to_one_minute
     
-    if recording:
-        return {"status": "error", "message": "Already recording"}
-    
-    # Use provided parameters or defaults
-    if output_dir is not None:
-        output_path = output_dir
-    if fps is not None:
-        recording_fps = fps
-    if width is not None and height is not None:
-        recording_resolution = (width, height)
-    if convert is not None:
-        convert_to_one_minute = convert
-    
-    # Ensure output directory exists
-    os.makedirs(output_path, exist_ok=True)
-    
-    # Generate filename with timestamp
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    recording_filename = f"{output_path}/recording_{timestamp}.mp4"
-    
-    try:
-        # Create VideoWriter object with MP4 format
-        if sys.platform == 'darwin':  # macOS
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # mp4v for Mac
-        else:
-            # For other platforms, try H264 or fallback to XVID
-            try:
-                fourcc = cv2.VideoWriter_fourcc(*'H264')
-            except:
-                fourcc = cv2.VideoWriter_fourcc(*'XVID')
-                # Change extension if we're using XVID
-                recording_filename = recording_filename.replace('.mp4', '.avi')
+    with video_writer_lock:
+        if recording:
+            return {"status": "error", "message": "Already recording"}
+        
+        # Use provided parameters or defaults
+        if output_dir is not None:
+            output_path = output_dir
+        if fps is not None:
+            recording_fps = fps
+        if width is not None and height is not None:
+            recording_resolution = (width, height)
+        if convert is not None:
+            convert_to_one_minute = convert
+        
+        # Ensure output directory exists
+        os.makedirs(output_path, exist_ok=True)
+        
+        # Generate filename with timestamp
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Use AVI format which is more reliable with OpenCV
+        recording_filename = f"{output_path}/recording_{timestamp}.avi"
+        
+        try:
+            # Create VideoWriter object with XVID codec for AVI (more reliable)
+            fourcc = cv2.VideoWriter_fourcc(*'XVID')
                 
-        video_writer = cv2.VideoWriter(
-            recording_filename, 
-            fourcc, 
-            recording_fps, 
-            recording_resolution
-        )
+            video_writer = cv2.VideoWriter(
+                recording_filename, 
+                fourcc, 
+                recording_fps, 
+                recording_resolution
+            )
+            
+            if not video_writer.isOpened():
+                return {"status": "error", "message": "Failed to create video writer"}
+            
+            # Reset frame count and start time
+            start_time = time.time()
+            frame_count = 0
+            recording = True
+            
+            print(f"Recording started: {recording_filename}")
+            print(f"FPS: {recording_fps}, Resolution: {recording_resolution}")
+            
+            return {"status": "success", "filename": recording_filename}
         
-        if not video_writer.isOpened():
-            return {"status": "error", "message": "Failed to create video writer"}
-        
-        # Reset frame count and start time
-        start_time = time.time()
-        frame_count = 0
-        recording = True
-        
-        print(f"Recording started: {recording_filename}")
-        print(f"FPS: {recording_fps}, Resolution: {recording_resolution}")
-        
-        return {"status": "success", "filename": recording_filename}
-    
-    except Exception as e:
-        error_msg = f"Error starting recording: {str(e)}"
-        print(error_msg)
-        return {"status": "error", "message": error_msg}
+        except Exception as e:
+            error_msg = f"Error starting recording: {str(e)}"
+            print(error_msg)
+            return {"status": "error", "message": error_msg}
 
 def stop_recording_func():
     """Stop recording video"""
     global recording, video_writer, recording_filename
     
-    if not recording:
-        return {"status": "error", "message": "Not recording"}
-    
-    try:
-        recording = False
+    with video_writer_lock:
+        if not recording:
+            return {"status": "error", "message": "Not recording"}
         
-        if video_writer is not None:
-            video_writer.release()
-            video_writer = None
-        
-        print(f"Recording stopped: {recording_filename}")
-        
-        # Convert the video if needed
-        if convert_to_one_minute and os.path.exists(recording_filename):
-            output_file = recording_filename.replace('.mp4', '_1min.mp4')
-            if recording_filename.endswith('.avi'):
-                output_file = recording_filename.replace('.avi', '_1min.mp4')
-                
-            print(f"Converting {recording_filename} to 1 minute...")
+        try:
+            # Set recording flag to false first
+            recording = False
+            orig_filename = recording_filename
             
-            try:
-                process_video(recording_filename, output_file)
-                print(f"Conversion complete: {output_file}")
+            # Release video writer
+            if video_writer is not None:
+                video_writer.release()
+                video_writer = None
+            
+            print(f"Recording stopped: {orig_filename}")
+            
+            # Convert the video if needed (to MP4 and/or 1 minute length)
+            if os.path.exists(orig_filename):
+                output_file = orig_filename
                 
-                # For AVI files, we can optionally convert them to MP4
-                if recording_filename.endswith('.avi'):
-                    print(f"Converting AVI to MP4...")
-                    convert_to_mp4(recording_filename)
+                # Convert to 1 minute if requested
+                if convert_to_one_minute:
+                    # Create a one minute version
+                    converted_file = orig_filename.replace('.avi', '_1min.avi')
+                    
+                    print(f"Converting {orig_filename} to 1 minute...")
+                    try:
+                        process_video(orig_filename, converted_file)
+                        print(f"Conversion to 1 minute complete: {converted_file}")
+                        output_file = converted_file
+                    except Exception as e:
+                        print(f"Error during 1 minute conversion: {e}")
                 
-            except Exception as e:
-                print(f"Error during conversion: {e}")
+                # Always convert to MP4 for better compatibility
+                try:
+                    mp4_file = output_file.replace('.avi', '.mp4')
+                    print(f"Converting to MP4: {mp4_file}")
+                    convert_to_mp4(output_file, mp4_file)
+                    
+                    # Use the MP4 as the final output file
+                    if os.path.exists(mp4_file):
+                        output_file = mp4_file
+                except Exception as e:
+                    print(f"Error converting to MP4: {e}")
+            
+            return {"status": "success", "filename": output_file}
         
-        return {"status": "success", "filename": recording_filename}
-    
-    except Exception as e:
-        error_msg = f"Error stopping recording: {str(e)}"
-        print(error_msg)
-        return {"status": "error", "message": error_msg}
+        except Exception as e:
+            error_msg = f"Error stopping recording: {str(e)}"
+            print(error_msg)
+            return {"status": "error", "message": error_msg}
 
-# New function to convert AVI to MP4
-def convert_to_mp4(input_file):
-    """Convert an AVI file to MP4 format"""
-    if not input_file.endswith('.avi'):
-        return
+def convert_to_mp4(input_file, output_file=None):
+    """Convert an AVI file to MP4 format using ffmpeg if available"""
+    if not os.path.exists(input_file):
+        print(f"Input file doesn't exist: {input_file}")
+        return False
         
-    try:
+    if output_file is None:
         output_file = input_file.replace('.avi', '.mp4')
         
+    try:
         # Check if ffmpeg is available
         try:
-            subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
             has_ffmpeg = True
         except:
             has_ffmpeg = False
             
         if has_ffmpeg:
-            # Use ffmpeg for conversion
+            # Use ffmpeg for conversion (more reliable)
             cmd = [
                 'ffmpeg',
                 '-i', input_file,
@@ -505,43 +555,61 @@ def convert_to_mp4(input_file):
                 '-preset', 'fast',
                 '-crf', '22',
                 '-y',
+                '-movflags', '+faststart',  # This puts the moov atom at the beginning of the file
                 output_file
             ]
             
             print(f"Running ffmpeg conversion: {' '.join(cmd)}")
-            subprocess.run(cmd, check=True)
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             print(f"Converted {input_file} to {output_file}")
+            return True
             
-            # Optionally delete the original file
-            # os.remove(input_file)
         else:
             print("ffmpeg not found, using OpenCV for conversion")
-            # Use OpenCV for conversion
+            # Use OpenCV for conversion (less reliable)
             cap = cv2.VideoCapture(input_file)
             if not cap.isOpened():
-                raise Exception("Could not open input file")
+                raise Exception(f"Could not open input file: {input_file}")
                 
+            # Get video properties
             fps = cap.get(cv2.CAP_PROP_FPS)
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             
+            if fps <= 0:
+                fps = recording_fps  # Use default if we can't detect
+            
+            # Use mp4v codec on macOS
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             out = cv2.VideoWriter(output_file, fourcc, fps, (width, height))
             
+            if not out.isOpened():
+                raise Exception(f"Could not create output file: {output_file}")
+            
+            frame_count = 0
             while True:
                 ret, frame = cap.read()
                 if not ret:
                     break
+                    
                 out.write(frame)
+                frame_count += 1
                 
+                # Print progress
+                if frame_count % 10 == 0:
+                    progress = (frame_count / total_frames) * 100 if total_frames > 0 else 0
+                    print(f"Conversion progress: {progress:.1f}% ({frame_count}/{total_frames})")
+                
+            # Release resources
             cap.release()
             out.release()
-            print(f"Converted {input_file} to {output_file}")
+            print(f"Converted {input_file} to {output_file} using OpenCV")
+            return True
             
-            # Optionally delete the original file
-            # os.remove(input_file)
     except Exception as e:
         print(f"Error converting to MP4: {e}")
+        return False
 
 @app.route('/start_recording', methods=['POST'])
 def start_recording():
@@ -575,50 +643,53 @@ def stop_recording():
 
 @app.route('/update_settings', methods=['POST'])
 def update_settings():
-    global recording_fps, recording_resolution, convert_to_one_minute, camera, output_path
+    """Update recording settings"""
+    global recording_fps, recording_resolution, convert_to_one_minute, output_path
     
-    if recording:
-        return jsonify({"status": "error", "message": "Cannot change settings while recording"})
-    
-    data = request.get_json()
-    
-    # Update settings
-    recording_fps = int(data.get('fps', recording_fps))
-    width = int(data.get('width', recording_resolution[0]))
-    height = int(data.get('height', recording_resolution[1]))
-    recording_resolution = (width, height)
-    convert_to_one_minute = data.get('convert_to_one_minute', convert_to_one_minute)
-    output_path = data.get('output_directory', output_path)
-    
-    # Update camera settings
-    if camera is not None:
-        camera.set(cv2.CAP_PROP_FRAME_WIDTH, recording_resolution[0])
-        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, recording_resolution[1])
-    
-    return jsonify({
-        "status": "success", 
-        "message": "Settings updated",
-        "settings": {
+    try:
+        data = request.get_json()
+        
+        # Update global settings
+        recording_fps = data.get('fps', recording_fps)
+        width = data.get('width', recording_resolution[0])
+        height = data.get('height', recording_resolution[1])
+        recording_resolution = (width, height)
+        convert_to_one_minute = data.get('convert_to_one_minute', convert_to_one_minute)
+        output_path = data.get('output_directory', output_path)
+        
+        # Ensure output directory exists
+        os.makedirs(output_path, exist_ok=True)
+        
+        # Save settings to file
+        settings = {
             "fps": recording_fps,
-            "resolution": f"{recording_resolution[0]}x{recording_resolution[1]}",
+            "width": width,
+            "height": height,
             "convert_to_one_minute": convert_to_one_minute,
             "output_directory": output_path
         }
-    })
+        
+        save_settings(settings)
+        
+        return jsonify({"status": "success", "message": "Settings updated"})
+    
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
 
 @app.route('/save_settings', methods=['POST'])
 def save_settings_route():
     """API endpoint to save settings"""
-    if recording:
-        return jsonify({"status": "error", "message": "Cannot save settings while recording"})
+    try:
+        settings = request.get_json()
+        success = save_settings(settings)
+        
+        if success:
+            return jsonify({"status": "success", "message": "Settings saved"})
+        else:
+            return jsonify({"status": "error", "message": "Failed to save settings"})
     
-    settings = request.get_json()
-    success = save_settings(settings)
-    
-    if success:
-        return jsonify({"status": "success", "message": "Settings saved"})
-    else:
-        return jsonify({"status": "error", "message": "Failed to save settings"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
 
 @app.route('/load_settings', methods=['GET'])
 def load_settings_route():
@@ -1068,20 +1139,22 @@ def serve_recording(filename):
     if not os.path.exists(file_path):
         return "File not found", 404
     
-    # Determine the correct MIME type
-    mime_type = 'video/mp4'
-    if filename.endswith('.avi'):
-        mime_type = 'video/x-msvideo'
-    
-    # Serve the file
-    return Response(
-        open(file_path, 'rb'),
-        mimetype=mime_type,
-        headers={
-            "Content-Disposition": f"inline; filename={filename}",
-            "Accept-Ranges": "bytes"  # Enable seeking in video player
-        }
-    )
+    try:
+        # Determine the correct MIME type
+        mime_type = 'video/mp4'
+        if filename.endswith('.avi'):
+            mime_type = 'video/x-msvideo'
+        
+        # Use send_file which handles large files better
+        return send_file(
+            file_path,
+            mimetype=mime_type,
+            as_attachment=False,
+            download_name=filename
+        )
+    except Exception as e:
+        print(f"Error serving file {filename}: {e}")
+        return f"Error serving file: {str(e)}", 500
 
 if __name__ == '__main__':
     # Parse command-line arguments

@@ -11,7 +11,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const recordingsList = document.getElementById('recordings-list');
     const recordingIndicator = document.getElementById('recording-indicator');
     const recordingTime = document.getElementById('recording-time');
-    const currentTimeDisplay = document.getElementById('current-time');
+    const videoFeed = document.getElementById('video-feed');
     const toastElement = document.getElementById('toast');
     const toastTitle = document.getElementById('toast-title');
     const toastMessage = document.getElementById('toast-message');
@@ -19,119 +19,24 @@ document.addEventListener('DOMContentLoaded', function() {
     // Bootstrap Toast
     const toast = new bootstrap.Toast(toastElement);
 
-    // Global variables - initialize with default values
+    // Global variables
     let isRecording = false;
     let recordingStartTime = null;
     let recordingTimer = null;
     let recentRecordings = [];
-    let clockTimer = null;
     let statusCheckTimer = null;
+    let videoFeedRetryCount = 0;
+    const maxVideoFeedRetries = 3;
 
-    // Start the clock
-    startClock();
-
-    // Load recent recordings from localStorage
-    loadRecentRecordings();
-
-    // Fetch recordings from the server
-    fetchRecordingsFromServer();
-
-    // Check current recording state with the server
-    checkRecordingStatus();
-    
-    // Set up periodic status checks
-    statusCheckTimer = setInterval(checkRecordingStatus, 5000);
-    
-    // Set up event listener for page unload
-    window.addEventListener('beforeunload', function() {
-        // Don't stop the recording when leaving the page
-        console.log('Page is being unloaded, but recording will continue if active');
-    });
-
-    // Function to start the clock
-    function startClock() {
-        updateClock(); // Update immediately
-        clockTimer = setInterval(updateClock, 1000); // Then update every second
-    }
-
-    function updateClock() {
-        const now = new Date();
-        const hours = now.getHours().toString().padStart(2, '0');
-        const minutes = now.getMinutes().toString().padStart(2, '0');
-        const seconds = now.getSeconds().toString().padStart(2, '0');
-        currentTimeDisplay.textContent = `${hours}:${minutes}:${seconds}`;
-    }
-
-    // Function to check the current recording status with the server
-    function checkRecordingStatus() {
-        console.log('Checking recording status with server...');
-        
-        // First, try the dedicated status endpoint
-        fetch('/check_recording_status')
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    console.log('Recording status:', data.recording ? 'Recording' : 'Not recording');
-                    
-                    if (data.recording) {
-                        // Server is recording, update UI
-                        isRecording = true;
-                        
-                        // If we don't have a start time, calculate it from elapsed time
-                        if (!recordingStartTime) {
-                            recordingStartTime = new Date() - (data.elapsed * 1000);
-                            startTimer();
-                        }
-                    } else {
-                        // Server is not recording
-                        isRecording = false;
-                        
-                        // Reset timer if needed
-                        if (recordingStartTime) {
-                            stopTimer();
-                            recordingStartTime = null;
-                        }
-                    }
-                    
-                    updateUI(isRecording);
-                }
-            })
-            .catch(error => {
-                console.error('Error checking recording status:', error);
-                
-                // Fallback to the stop_recording endpoint in case the new endpoint is not available
-                fetch('/stop_recording', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({})
-                })
-                .then(response => response.json())
-                .then(data => {
-                    console.log('Fallback recording status check:', data);
-                    // If we get "Not recording" error, we're not recording
-                    isRecording = !(data.status === 'error' && data.message === 'Not recording');
-                    updateUI(isRecording);
-                })
-                .catch(err => {
-                    console.error('Error in fallback recording status check:', err);
-                    // Default to not recording in case of error
-                    isRecording = false;
-                    updateUI(false);
-                });
-            });
-    }
-
-    // Load saved settings
+    // Initialize settings
     loadSettings();
 
-    // Update FPS value display
+    // Update FPS value display when slider moves
     fpsRange.addEventListener('input', function() {
         fpsValue.textContent = this.value;
     });
 
-    // Apply settings
+    // Apply settings button click
     applySettingsBtn.addEventListener('click', function() {
         const fps = parseInt(fpsRange.value);
         const [width, height] = resolutionSelect.value.split('x').map(val => parseInt(val));
@@ -173,8 +78,90 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
+    // Handle video feed errors
+    if (videoFeed) {
+        videoFeed.onerror = function() {
+            console.error('Video feed error detected');
+            if (videoFeedRetryCount < maxVideoFeedRetries) {
+                videoFeedRetryCount++;
+                console.log(`Retrying video feed (${videoFeedRetryCount}/${maxVideoFeedRetries})...`);
+                
+                // Add a timestamp parameter to force reload
+                const timestamp = new Date().getTime();
+                videoFeed.src = `/video_feed?t=${timestamp}`;
+            } else {
+                console.error('Max video feed retries reached');
+                showToast('Error', 'Video feed failed to load. Please refresh the page.', 'error');
+            }
+        };
+        
+        videoFeed.onload = function() {
+            console.log('Video feed loaded successfully');
+            videoFeedRetryCount = 0;
+        };
+    }
+
+    // Load recent recordings from localStorage
+    loadRecentRecordings();
+
+    // Fetch recordings from the server
+    fetchRecordingsFromServer();
+
+    // Check current recording state with the server
+    checkRecordingStatus();
+    
+    // Set up periodic status checks - every 3 seconds
+    statusCheckTimer = setInterval(checkRecordingStatus, 3000);
+    
+    // Function to check the current recording status with the server
+    function checkRecordingStatus() {
+        fetch('/check_recording_status')
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`Status check failed: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                if (data.status === 'success') {
+                    const wasRecording = isRecording;
+                    isRecording = data.recording;
+                    
+                    // Only update UI if recording state changed
+                    if (wasRecording !== isRecording) {
+                        console.log('Recording status changed:', isRecording ? 'Recording' : 'Not recording');
+                        
+                        if (isRecording) {
+                            // Server is recording, update UI
+                            recordingStartTime = new Date() - (data.elapsed * 1000);
+                            startTimer();
+                        } else {
+                            // Server is not recording
+                            stopTimer();
+                            recordingStartTime = null;
+                            
+                            // Refresh recordings list when recording stops
+                            fetchRecordingsFromServer();
+                        }
+                        
+                        updateUI(isRecording);
+                    } else {
+                        // Still update timer if recording
+                        if (isRecording && recordingStartTime) {
+                            updateRecordingTimer();
+                        }
+                    }
+                }
+            })
+            .catch(error => {
+                console.error('Error checking recording status:', error);
+            });
+    }
+
     // Start recording
     startRecordingBtn.addEventListener('click', function() {
+        console.log('Start recording button clicked');
+        
         const fps = parseInt(fpsRange.value);
         const [width, height] = resolutionSelect.value.split('x').map(val => parseInt(val));
         const convertToOneMinute = convertToggle.checked;
@@ -184,6 +171,12 @@ document.addEventListener('DOMContentLoaded', function() {
             showToast('Error', 'Output directory cannot be empty!', 'error');
             return;
         }
+
+        // Disable the button to prevent double clicks
+        startRecordingBtn.disabled = true;
+        
+        // Show feedback to user
+        showToast('Processing', 'Starting recording...', 'info');
 
         // Send start recording request
         fetch('/start_recording', {
@@ -199,7 +192,12 @@ document.addEventListener('DOMContentLoaded', function() {
                 output_directory: outputDir
             })
         })
-        .then(response => response.json())
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`Request failed: ${response.status}`);
+            }
+            return response.json();
+        })
         .then(data => {
             if (data.status === 'success') {
                 isRecording = true;
@@ -208,16 +206,27 @@ document.addEventListener('DOMContentLoaded', function() {
                 startTimer();
                 showToast('Success', 'Recording started!', 'success');
             } else {
+                // Re-enable button if there was an error
+                startRecordingBtn.disabled = false;
                 showToast('Error', data.message, 'error');
             }
         })
         .catch(error => {
+            console.error('Failed to start recording:', error);
+            // Re-enable button if there was an error
+            startRecordingBtn.disabled = false;
             showToast('Error', 'Failed to start recording: ' + error, 'error');
         });
     });
 
     // Stop recording
     stopRecordingBtn.addEventListener('click', function() {
+        // Disable the button to prevent multiple clicks
+        stopRecordingBtn.disabled = true;
+        
+        // Show feedback to user
+        showToast('Processing', 'Stopping recording and processing video...', 'info');
+        
         fetch('/stop_recording', {
             method: 'POST',
             headers: {
@@ -225,59 +234,65 @@ document.addEventListener('DOMContentLoaded', function() {
             },
             body: JSON.stringify({})
         })
-        .then(response => response.json())
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`Request failed: ${response.status}`);
+            }
+            return response.json();
+        })
         .then(data => {
             if (data.status === 'success') {
                 isRecording = false;
                 updateUI(false);
                 stopTimer();
-                showToast('Success', 'Recording stopped!', 'success');
                 
                 // Refresh the recordings list
-                setTimeout(fetchRecordingsFromServer, 1000); // Wait a second for the file to be processed
+                setTimeout(fetchRecordingsFromServer, 1000);
+                showToast('Success', 'Recording completed successfully!', 'success');
             } else {
+                // Re-enable the button if there was an error
+                stopRecordingBtn.disabled = false;
                 showToast('Error', data.message, 'error');
             }
         })
         .catch(error => {
+            console.error('Failed to stop recording:', error);
+            // Re-enable the button if there was an error
+            stopRecordingBtn.disabled = false;
             showToast('Error', 'Failed to stop recording: ' + error, 'error');
         });
     });
 
-    // Helper Functions
     function updateUI(isRecording) {
-        console.log('Updating UI, isRecording:', isRecording);
-        
-        // Make sure the buttons are properly enabled/disabled
-        startRecordingBtn.disabled = isRecording;
-        stopRecordingBtn.disabled = !isRecording;
-        
-        // Update other UI elements
-        applySettingsBtn.disabled = isRecording;
-        fpsRange.disabled = isRecording;
-        resolutionSelect.disabled = isRecording;
-        convertToggle.disabled = isRecording;
-        outputDirectory.disabled = isRecording;
-        
         if (isRecording) {
-            recordingIndicator.classList.remove('d-none');
-            // Also ensure the stop button is visible and enabled
-            stopRecordingBtn.classList.remove('d-none');
+            startRecordingBtn.disabled = true;
             stopRecordingBtn.disabled = false;
+            applySettingsBtn.disabled = true;
+            fpsRange.disabled = true;
+            resolutionSelect.disabled = true;
+            convertToggle.disabled = true;
+            outputDirectory.disabled = true;
+            
+            recordingIndicator.classList.remove('d-none');
         } else {
+            startRecordingBtn.disabled = false;
+            stopRecordingBtn.disabled = true;
+            applySettingsBtn.disabled = false;
+            fpsRange.disabled = false;
+            resolutionSelect.disabled = false;
+            convertToggle.disabled = false;
+            outputDirectory.disabled = false;
+            
             recordingIndicator.classList.add('d-none');
         }
-        
-        // Debug button states
-        console.log('Start button disabled:', startRecordingBtn.disabled);
-        console.log('Stop button disabled:', stopRecordingBtn.disabled);
     }
 
     function startTimer() {
-        recordingTimer = setInterval(() => {
-            const elapsedTime = getElapsedTimeFormatted(recordingStartTime, Date.now());
-            recordingTime.textContent = elapsedTime;
-        }, 1000);
+        if (recordingTimer) {
+            clearInterval(recordingTimer);
+        }
+        recordingTimer = setInterval(updateRecordingTimer, 1000);
+        updateRecordingTimer(); // Update immediately
     }
 
     function stopTimer() {
@@ -287,12 +302,198 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
-    function getElapsedTimeFormatted(startTime, endTime) {
-        const elapsed = Math.floor((endTime - startTime) / 1000);
-        const hours = Math.floor(elapsed / 3600).toString().padStart(2, '0');
-        const minutes = Math.floor((elapsed % 3600) / 60).toString().padStart(2, '0');
+    function updateRecordingTimer() {
+        if (!recordingTime || !recordingStartTime) return;
+        
+        const elapsed = Math.floor((new Date() - recordingStartTime) / 1000);
+        const minutes = Math.floor(elapsed / 60).toString().padStart(2, '0');
         const seconds = (elapsed % 60).toString().padStart(2, '0');
-        return `${hours}:${minutes}:${seconds}`;
+        recordingTime.textContent = `${minutes}:${seconds}`;
+    }
+
+    function playRecording(filename) {
+        console.log(`Playing recording: ${filename}`);
+        
+        // Create a video player modal if it doesn't exist
+        let playerModal = document.getElementById('videoPlayerModal');
+        
+        if (!playerModal) {
+            // Create modal HTML
+            const modalHTML = `
+                <div class="modal fade" id="videoPlayerModal" tabindex="-1" aria-labelledby="videoPlayerModalLabel" aria-hidden="true">
+                    <div class="modal-dialog modal-lg">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h5 class="modal-title" id="videoPlayerModalLabel">Video Player</h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                            </div>
+                            <div class="modal-body">
+                                <div class="ratio ratio-16x9">
+                                    <video id="videoPlayer" controls>
+                                        Your browser does not support the video tag.
+                                    </video>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            // Add modal to body
+            const modalContainer = document.createElement('div');
+            modalContainer.innerHTML = modalHTML;
+            document.body.appendChild(modalContainer);
+            
+            playerModal = document.getElementById('videoPlayerModal');
+        }
+        
+        // Set the video source with a timestamp to prevent caching
+        const timestamp = new Date().getTime();
+        const videoPlayer = document.getElementById('videoPlayer');
+        videoPlayer.src = `/recordings/${filename}?t=${timestamp}`;
+        
+        // Show the modal
+        const modal = new bootstrap.Modal(playerModal);
+        modal.show();
+        
+        // Set up error handling
+        videoPlayer.onerror = function() {
+            console.error('Error playing video:', videoPlayer.error);
+            showToast('Error', `Failed to play video: ${videoPlayer.error ? videoPlayer.error.message : 'Unknown error'}`, 'error');
+        };
+        
+        // Play the video when modal is shown
+        playerModal.addEventListener('shown.bs.modal', function () {
+            videoPlayer.play().catch(e => {
+                console.error('Error playing video:', e);
+                showToast('Error', 'Failed to play video: ' + e, 'error');
+            });
+        });
+        
+        // Stop the video when modal is hidden
+        playerModal.addEventListener('hidden.bs.modal', function () {
+            videoPlayer.pause();
+            videoPlayer.src = ''; // Clear the source to fully unload the video
+        });
+    }
+
+    function fetchRecordingsFromServer() {
+        console.log('Fetching recordings from server...');
+        fetch('/get_recordings')
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`Request failed: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                if (data.status === 'success') {
+                    console.log('Received recordings:', data.recordings);
+                    recentRecordings = data.recordings;
+                    updateRecordingsList();
+                } else {
+                    console.error('Error fetching recordings:', data.message);
+                    showToast('Error', 'Failed to fetch recordings: ' + data.message, 'error');
+                }
+            })
+            .catch(error => {
+                console.error('Error fetching recordings:', error);
+                showToast('Error', 'Failed to fetch recordings: ' + error, 'error');
+            });
+    }
+
+    // Settings persistence functions
+    function saveSettings() {
+        const settings = {
+            fps: parseInt(fpsRange.value),
+            resolution: resolutionSelect.value,
+            convertToOneMinute: convertToggle.checked,
+            outputDirectory: outputDirectory.value
+        };
+        
+        localStorage.setItem('lockInRecorderSettings', JSON.stringify(settings));
+        
+        // Also save to server
+        fetch('/save_settings', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(settings)
+        })
+        .catch(error => {
+            console.error('Failed to save settings to server:', error);
+        });
+    }
+    
+    function loadSettings() {
+        // Try to load from localStorage first
+        const savedSettings = localStorage.getItem('lockInRecorderSettings');
+        
+        if (savedSettings) {
+            try {
+                const settings = JSON.parse(savedSettings);
+                fpsRange.value = settings.fps || 2;
+                fpsValue.textContent = settings.fps || 2;
+                
+                if (settings.resolution) {
+                    // Find the option with this value
+                    const options = Array.from(resolutionSelect.options);
+                    const option = options.find(opt => opt.value === settings.resolution);
+                    if (option) {
+                        option.selected = true;
+                    }
+                }
+                
+                convertToggle.checked = settings.convertToOneMinute !== undefined ? settings.convertToOneMinute : true;
+                outputDirectory.value = settings.outputDirectory || 'recordings';
+            } catch (e) {
+                console.error('Error parsing saved settings:', e);
+            }
+        }
+        
+        // Then try to load from server
+        fetch('/load_settings')
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success' && data.settings) {
+                    const settings = data.settings;
+                    fpsRange.value = settings.fps || 2;
+                    fpsValue.textContent = settings.fps || 2;
+                    
+                    if (settings.resolution) {
+                        // Find the option with this value
+                        const options = Array.from(resolutionSelect.options);
+                        const option = options.find(opt => opt.value === settings.resolution);
+                        if (option) {
+                            option.selected = true;
+                        }
+                    }
+                    
+                    convertToggle.checked = settings.convertToOneMinute !== undefined ? settings.convertToOneMinute : true;
+                    outputDirectory.value = settings.outputDirectory || 'recordings';
+                }
+            })
+            .catch(error => {
+                console.error('Failed to load settings from server:', error);
+            });
+    }
+
+    // Save and load recent recordings
+    function saveRecentRecordings() {
+        localStorage.setItem('lockInRecorderRecordings', JSON.stringify(recentRecordings));
+    }
+    
+    function loadRecentRecordings() {
+        const savedRecordings = localStorage.getItem('lockInRecorderRecordings');
+        if (savedRecordings) {
+            try {
+                recentRecordings = JSON.parse(savedRecordings);
+                updateRecordingsList();
+            } catch (e) {
+                console.error('Error parsing saved recordings:', e);
+            }
+        }
     }
 
     function updateRecordingsList() {
@@ -362,65 +563,6 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    function playRecording(filename) {
-        console.log(`Playing recording: ${filename}`);
-        
-        // Create a video player modal if it doesn't exist
-        let playerModal = document.getElementById('videoPlayerModal');
-        
-        if (!playerModal) {
-            // Create modal HTML
-            const modalHTML = `
-                <div class="modal fade" id="videoPlayerModal" tabindex="-1" aria-labelledby="videoPlayerModalLabel" aria-hidden="true">
-                    <div class="modal-dialog modal-lg">
-                        <div class="modal-content">
-                            <div class="modal-header">
-                                <h5 class="modal-title" id="videoPlayerModalLabel">Video Player</h5>
-                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                            </div>
-                            <div class="modal-body">
-                                <div class="ratio ratio-16x9">
-                                    <video id="videoPlayer" controls>
-                                        Your browser does not support the video tag.
-                                    </video>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            `;
-            
-            // Add modal to body
-            const modalContainer = document.createElement('div');
-            modalContainer.innerHTML = modalHTML;
-            document.body.appendChild(modalContainer);
-            
-            playerModal = document.getElementById('videoPlayerModal');
-        }
-        
-        // Set the video source
-        const videoPlayer = document.getElementById('videoPlayer');
-        videoPlayer.src = `/recordings/${filename}`;
-        
-        // Show the modal
-        const modal = new bootstrap.Modal(playerModal);
-        modal.show();
-        
-        // Play the video when modal is shown
-        playerModal.addEventListener('shown.bs.modal', function () {
-            videoPlayer.play().catch(e => {
-                console.error('Error playing video:', e);
-                showToast('Error', 'Failed to play video: ' + e, 'error');
-            });
-        });
-        
-        // Stop the video when modal is hidden
-        playerModal.addEventListener('hidden.bs.modal', function () {
-            videoPlayer.pause();
-            videoPlayer.currentTime = 0;
-        });
-    }
-
     function deleteRecording(filename) {
         console.log(`Deleting recording: ${filename}`);
         
@@ -457,138 +599,6 @@ document.addEventListener('DOMContentLoaded', function() {
         else return (bytes / 1073741824).toFixed(1) + ' GB';
     }
 
-    function getFilenameFromPath(path) {
-        return path.split('/').pop();
-    }
-
-    function showToast(title, message, type = 'info') {
-        toastTitle.textContent = title;
-        toastMessage.textContent = message;
-        
-        // Remove previous classes
-        toastElement.classList.remove('bg-success', 'bg-danger', 'bg-info');
-        
-        // Add appropriate class based on type
-        if (type === 'success') {
-            toastElement.classList.add('bg-success', 'text-white');
-        } else if (type === 'error') {
-            toastElement.classList.add('bg-danger', 'text-white');
-        } else {
-            toastElement.classList.add('bg-info', 'text-white');
-        }
-        
-        toast.show();
-    }
-
-    // Settings persistence functions
-    function saveSettings() {
-        const settings = {
-            fps: parseInt(fpsRange.value),
-            resolution: resolutionSelect.value,
-            convertToOneMinute: convertToggle.checked,
-            outputDirectory: outputDirectory.value
-        };
-        
-        localStorage.setItem('lockInRecorderSettings', JSON.stringify(settings));
-        
-        // Also save to server
-        fetch('/save_settings', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(settings)
-        })
-        .catch(error => {
-            console.error('Failed to save settings to server:', error);
-        });
-    }
-    
-    function loadSettings() {
-        // Try to load from localStorage first
-        const savedSettings = localStorage.getItem('lockInRecorderSettings');
-        
-        if (savedSettings) {
-            const settings = JSON.parse(savedSettings);
-            fpsRange.value = settings.fps || 2;
-            fpsValue.textContent = settings.fps || 2;
-            
-            if (settings.resolution) {
-                // Find the option with this value
-                const options = Array.from(resolutionSelect.options);
-                const option = options.find(opt => opt.value === settings.resolution);
-                if (option) {
-                    option.selected = true;
-                }
-            }
-            
-            convertToggle.checked = settings.convertToOneMinute !== undefined ? settings.convertToOneMinute : true;
-            outputDirectory.value = settings.outputDirectory || 'recordings';
-        }
-        
-        // Then try to load from server
-        fetch('/load_settings')
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success' && data.settings) {
-                    const settings = data.settings;
-                    fpsRange.value = settings.fps || 2;
-                    fpsValue.textContent = settings.fps || 2;
-                    
-                    if (settings.resolution) {
-                        // Find the option with this value
-                        const options = Array.from(resolutionSelect.options);
-                        const option = options.find(opt => opt.value === settings.resolution);
-                        if (option) {
-                            option.selected = true;
-                        }
-                    }
-                    
-                    convertToggle.checked = settings.convertToOneMinute !== undefined ? settings.convertToOneMinute : true;
-                    outputDirectory.value = settings.outputDirectory || 'recordings';
-                    
-                    // Also update localStorage
-                    localStorage.setItem('lockInRecorderSettings', JSON.stringify(settings));
-                }
-            })
-            .catch(error => {
-                console.error('Failed to load settings from server:', error);
-            });
-    }
-
-    // Save and load recent recordings
-    function saveRecentRecordings() {
-        localStorage.setItem('lockInRecorderRecordings', JSON.stringify(recentRecordings));
-    }
-    
-    function loadRecentRecordings() {
-        const savedRecordings = localStorage.getItem('lockInRecorderRecordings');
-        if (savedRecordings) {
-            recentRecordings = JSON.parse(savedRecordings);
-            updateRecordingsList();
-        }
-    }
-
-    function fetchRecordingsFromServer() {
-        console.log('Fetching recordings from server...');
-        fetch('/get_recordings')
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    console.log('Received recordings:', data.recordings);
-                    recentRecordings = data.recordings;
-                    updateRecordingsList();
-                } else {
-                    console.error('Error fetching recordings:', data.message);
-                    showToast('Error', 'Failed to fetch recordings: ' + data.message, 'error');
-                }
-            })
-            .catch(error => {
-                console.error('Error fetching recordings:', error);
-                showToast('Error', 'Failed to fetch recordings: ' + error, 'error');
-            });
-    }
-
     function formatDuration(seconds) {
         seconds = Math.round(seconds);
         const hours = Math.floor(seconds / 3600).toString().padStart(2, '0');
@@ -597,25 +607,48 @@ document.addEventListener('DOMContentLoaded', function() {
         return `${hours}:${minutes}:${secs}`;
     }
 
-    // Add a refresh button to the recordings list header
-    document.addEventListener('DOMContentLoaded', function() {
-        // Find the Recent Recordings header
-        const recordingsHeaders = document.querySelectorAll('.card-header');
-        for (const header of recordingsHeaders) {
-            if (header.textContent.includes('Recent Recordings')) {
-                const refreshBtn = document.createElement('button');
-                refreshBtn.className = 'btn btn-sm btn-outline-secondary float-end';
-                refreshBtn.innerHTML = '<i class="fas fa-sync-alt"></i>';
-                refreshBtn.title = 'Refresh recordings';
-                refreshBtn.addEventListener('click', fetchRecordingsFromServer);
-                
-                header.appendChild(refreshBtn);
+    function getFilenameFromPath(path) {
+        return path.split(/[\/\\]/).pop();
+    }
+
+    // Show a toast notification
+    function showToast(title, message, type = 'info') {
+        toastTitle.textContent = title;
+        toastMessage.textContent = message;
+        
+        // Remove existing classes
+        toastElement.classList.remove('bg-success', 'bg-danger', 'bg-info', 'bg-warning');
+        
+        // Add appropriate class
+        switch(type) {
+            case 'success':
+                toastElement.classList.add('bg-success', 'text-white');
                 break;
-            }
+            case 'error':
+                toastElement.classList.add('bg-danger', 'text-white');
+                break;
+            case 'warning':
+                toastElement.classList.add('bg-warning');
+                break;
+            case 'info':
+            default:
+                toastElement.classList.add('bg-info', 'text-white');
+                break;
+        }
+        
+        toast.show();
+    }
+
+    // Clean up intervals when page is unloaded
+    window.addEventListener('beforeunload', function() {
+        if (statusCheckTimer) {
+            clearInterval(statusCheckTimer);
+        }
+        if (recordingTimer) {
+            clearInterval(recordingTimer);
         }
     });
 
     // Initialize with default UI state
     updateUI(false);
-    updateRecordingsList();
 }); 
